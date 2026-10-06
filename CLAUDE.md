@@ -14,13 +14,14 @@ AI colorization of black-and-white photographs. Local-first, cross-platform (Lin
 ## Commands
 
 ```bash
-uv sync                       # install
+uv sync --extra cpu           # install (or --extra cuda / --extra directml; exactly one)
 uv run colorizer-ui           # launch Gradio UI (http://127.0.0.1:7860)
 uv run colorizer in/ out/ --model ddcolor --param size=512   # batch CLI
 uv run pytest                 # tests
 COLORIZER_TEST_WEIGHTS=1 uv run pytest -m weights   # real-model tests
 uv run --group export python tools/export_onnx/zhang.py   # one-time ONNX export (CPU torch)
 uv run --group export python tools/export_onnx/deoldify.py   # DeOldify, rebuilt without fastai
+uv run --group export python tools/export_onnx/ddcolor.py    # DDColor, uses upstream code at a pinned commit
 uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
 ```
 
@@ -118,6 +119,7 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 - ONNX provider priority: CUDA → ROCm → DirectML → CoreML → CPU. Pick the first one listed by `onnxruntime.get_available_providers()`.
 - Users can force a device via the `COLORIZER_DEVICE` env var or a UI dropdown.
 - If a GPU provider fails on load, fall back to CPU with a visible warning.
+- ONNX Runtime comes from exactly one of the conflicting extras `cpu`, `cuda`, `directml` (they all install the `onnxruntime` module). The `cuda` extra pulls CUDA/cuDNN from PyPI; `runtime.py` calls `onnxruntime.preload_dlls()` so they are found.
 
 ## UI (gradio_app.py)
 
@@ -203,7 +205,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestones 1-2 done (2026-10-06); milestone 3: DeOldify done, DDColor export pending (fetching/running upstream code at export time needs the owner's approval). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
+Status: milestones 1-3 done (2026-10-06). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.

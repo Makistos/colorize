@@ -24,7 +24,7 @@ from colorizer.core.runtime import select_device
 
 log = logging.getLogger("colorizer")
 
-DEFAULT_MODEL = "zhang_eccv16"
+DEFAULT_MODEL = "ddcolor"
 _SUFFIX_FORMATS: dict[str, OutputFormat] = {
     ".png": "png",
     ".jpg": "jpg",

@@ -69,3 +69,16 @@ def test_gpu_success(monkeypatch):
     cuda = Device("cuda", "CUDAExecutionProvider")
     _, dev = create_session(Path("m.onnx"), cuda)
     assert dev == cuda
+
+
+def test_cuda_preloads_pip_libraries_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(runtime.ort, "InferenceSession", FakeSession)
+    monkeypatch.setattr(runtime.ort, "preload_dlls", lambda: calls.append(1), raising=False)
+    monkeypatch.setattr(runtime, "_cuda_preloaded", False)
+    FakeSession.cuda_mode = "ok"
+    cuda = Device("cuda", "CUDAExecutionProvider")
+    create_session(Path("a.onnx"), cuda)
+    create_session(Path("b.onnx"), cuda)
+    create_session(Path("c.onnx"), Device("directml", "DmlExecutionProvider"))
+    assert calls == [1]

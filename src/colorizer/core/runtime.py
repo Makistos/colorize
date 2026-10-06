@@ -8,7 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import onnxruntime as ort
+try:
+    import onnxruntime as ort
+except ImportError as e:  # pragma: no cover - depends on the installed extra
+    raise ImportError(
+        "No ONNX Runtime installed. Install exactly one build:\n"
+        "    uv sync --extra cpu        # any machine\n"
+        "    uv sync --extra cuda       # NVIDIA GPU (Linux/Windows)\n"
+        "    uv sync --extra directml   # DirectX 12 GPU (Windows)"
+    ) from e
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +78,8 @@ def create_session(model_path: Path, device: Device) -> tuple[Any, Device]:
     opts = ort.SessionOptions()
     opts.log_severity_level = 3  # errors only; we report fallbacks ourselves
     if device.is_gpu:
+        if device.name == "cuda":
+            _preload_cuda_libraries()
         try:
             session = ort.InferenceSession(
                 str(model_path), sess_options=opts, providers=[device.provider, CPU_PROVIDER]
@@ -87,3 +97,23 @@ def create_session(model_path: Path, device: Device) -> tuple[Any, Device]:
             )
     session = ort.InferenceSession(str(model_path), sess_options=opts, providers=[CPU_PROVIDER])
     return session, CPU
+
+
+_cuda_preloaded = False
+
+
+def _preload_cuda_libraries() -> None:
+    """Load the CUDA/cuDNN libraries installed from PyPI (the ``cuda`` extra).
+
+    onnxruntime-gpu does not search the ``nvidia-*`` wheels on its own; without this the
+    CUDA provider fails with e.g. "libcublasLt.so: cannot open shared object file".
+    Harmless when the libraries come from a system CUDA install instead.
+    """
+    global _cuda_preloaded
+    if _cuda_preloaded or not hasattr(ort, "preload_dlls"):  # added in onnxruntime 1.21
+        return
+    _cuda_preloaded = True
+    try:
+        ort.preload_dlls()
+    except Exception as e:
+        log.debug("onnxruntime.preload_dlls failed: %s", e)

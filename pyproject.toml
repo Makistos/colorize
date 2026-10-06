@@ -10,9 +10,18 @@ dependencies = [
     "pillow>=10.3",
     "opencv-python-headless>=4.9",
     "scikit-image>=0.22",
-    "onnxruntime>=1.18",
     "gradio>=5.0",
 ]
+
+[project.optional-dependencies]
+# Exactly one ONNX Runtime build is required; they install the same module and conflict.
+# CPU everywhere; on macOS this build also includes CoreML.
+cpu = ["onnxruntime>=1.18"]
+# NVIDIA GPUs (Linux, Windows). Needs a recent NVIDIA driver; the CUDA and cuDNN runtime
+# libraries are installed from PyPI.
+cuda = ["onnxruntime-gpu[cuda,cudnn]>=1.18; sys_platform == 'linux' or sys_platform == 'win32'"]
+# Any DirectX 12 GPU on Windows.
+directml = ["onnxruntime-directml>=1.18; sys_platform == 'win32'"]
 
 [project.scripts]
 colorizer = "colorizer.cli:main"
@@ -39,6 +48,7 @@ export = [
 
 [tool.uv]
 default-groups = ["dev"]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }, { extra = "directml" }]]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

@@ -22,14 +22,17 @@ jobs:
       - name: Export ONNX models
         run: |
           if [ ! -f ~/.cache/colorizer/zhang_eccv16.onnx ]; then
-            uv run --locked --group export python tools/export_onnx/zhang.py
+            uv run --locked --extra cpu --group export python tools/export_onnx/zhang.py
           fi
           if [ ! -f ~/.cache/colorizer/deoldify_stable.onnx ]; then
-            uv run --locked --group export python tools/export_onnx/deoldify.py
+            uv run --locked --extra cpu --group export python tools/export_onnx/deoldify.py
+          fi
+          if [ ! -f ~/.cache/colorizer/ddcolor_large.onnx ]; then
+            uv run --locked --extra cpu --group export python tools/export_onnx/ddcolor.py
           fi
           # The exported ONNX files are what the tests need; drop the checkpoints so the
           # cache stays well under the 10 GB per-repo limit.
           rm -f ~/.cache/colorizer/*.pth ~/.cache/colorizer/*.bin
-      - run: uv run --locked pytest -m weights
+      - run: uv run --locked --extra cpu pytest -m weights
         env:
           COLORIZER_TEST_WEIGHTS: "1"
