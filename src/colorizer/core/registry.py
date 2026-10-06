@@ -19,6 +19,7 @@ BUILTIN_MODELS: dict[str, str] = {
     # First entry is the UI's default model.
     "ddcolor": "colorizer.models.ddcolor:DDColor",
     "zhang_eccv16": "colorizer.models.zhang:ZhangECCV16",
+    "zhang_siggraph17": "colorizer.models.zhang:ZhangSIGGRAPH17",
     "deoldify": "colorizer.models.deoldify:DeOldify",
 }
 

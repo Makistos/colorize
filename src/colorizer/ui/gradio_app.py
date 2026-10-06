@@ -15,7 +15,7 @@ import tempfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 # Local-first: no launch telemetry or version pings. Must be set before gradio is imported.
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
@@ -23,9 +23,11 @@ os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 import gradio as gr
 import numpy as np
 
+from colorizer.core import presets
 from colorizer.core.base import ColorizerModel
+from colorizer.core.batch import BatchItem, BatchResult, run_batch
 from colorizer.core.params import Param
-from colorizer.core.pipeline import EXTENSIONS, SUFFIX_FORMATS, render, save_image
+from colorizer.core.pipeline import EXTENSIONS, SUFFIX_FORMATS, OutputFormat, render, save_image
 from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
 from colorizer.core.registry import Registry, default_registry
 from colorizer.core.runtime import ENV_DEVICE, available_devices, select_device
@@ -37,6 +39,8 @@ log = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.1
 SETTINGS_FILE = "ui.json"
+THUMB_SIZE = 384
+T = TypeVar("T")
 Rendered = tuple[np.ndarray, np.ndarray, Path]  # before, after (uint8 RGB), saved file
 
 
@@ -85,10 +89,27 @@ def widget_value(param: Param, value: Any) -> Any:
     return value
 
 
-def default_config_dir() -> Path:
-    """``$XDG_CONFIG_HOME/colorizer`` or ``~/.config/colorizer``."""
-    base = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(base) if base else Path.home() / ".config") / "colorizer"
+def _to_widget(param: Param, value: Any) -> Any:
+    """Inverse of ``widget_value``: a validated value as its widget shows it."""
+    if param.kind == "points":
+        return json.dumps([[x, y, list(rgb)] for x, y, rgb in value])
+    return value
+
+
+def parse_color(value: str) -> tuple[int, int, int]:
+    """``#rrggbb`` or ``rgb(a)(r, g, b[, a])`` from gr.ColorPicker -> (r, g, b)."""
+    value = value.strip()
+    if value.startswith("#") and len(value) in (7, 9):
+        return int(value[1:3], 16), int(value[3:5], 16), int(value[5:7], 16)
+    if value.startswith("rgb"):
+        parts = value[value.index("(") + 1 : value.rindex(")")].split(",")
+        r, g, b = (round(float(p)) for p in parts[:3])
+        return r, g, b
+    raise ValueError(f"unrecognised colour {value!r}")
+
+
+def hex_color(rgb: Sequence[int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
 
 
 def to_uint8(rgb: np.ndarray) -> np.ndarray:
@@ -126,8 +147,9 @@ class App:
             raise RuntimeError("no models available")
         self.slots = [Slot(mid, p) for mid, cls in self.models.items() for p in cls.params]
         self._before: LRU[str, np.ndarray] = LRU(4)
-        self._current: Job[Rendered] | None = None
-        self.config_dir = config_dir or default_config_dir()
+        self._current: Job[Any] | None = None
+        self.config_dir = config_dir or presets.config_dir()
+        self.presets_dir = self.config_dir / "presets"
         self.last_save_dir = self._load_last_save_dir()
 
     # --- settings -------------------------------------------------------------------------
@@ -225,29 +247,225 @@ class App:
             ctx.progress(0.9, "Rendering")
             return self._render(image, ab, post, path.name, fmt, int(quality))
 
-        if self._current is not None:
-            self._current.cancel()
-        job = self._current = self.worker.submit(job_fn)
+        job = self._submit(job_fn)
         try:
-            shown: tuple[float, str] | None = None
-            while not job.wait(POLL_SECONDS):
-                if job.progress != shown:
-                    shown = job.progress
-                    yield gr.skip(), gr.skip(), f"{shown[1]}… {shown[0]:.0%}"
+            for progress in self._follow(job):
+                yield gr.skip(), gr.skip(), progress
             try:
-                before, after, out = job.result()
+                before, after, out = self._result(job)
             except Cancelled:
                 yield gr.skip(), gr.skip(), "Cancelled."
                 return
-            except Exception as e:
-                log.exception("colorize failed")
-                raise gr.Error(str(e)) from e
-            finally:
-                for message in job.warnings:
-                    gr.Warning(message)
             yield (before, after), str(out), f"Done: {self.models[model_id].display_name}."
         finally:
             job.cancel()  # no-op when finished; stops the job if Gradio closed this generator
+
+    # --- job plumbing ---------------------------------------------------------------------
+
+    def _submit(self, fn: Any) -> Job[Any]:
+        """Run ``fn(ctx)`` on the worker as the current job (replacing any running one)."""
+        if self._current is not None:
+            self._current.cancel()
+        self._current = self.worker.submit(fn)
+        return self._current
+
+    @staticmethod
+    def _follow(job: Job[Any]) -> Iterator[str]:
+        """Yield a status line whenever the job's progress changes, until it finishes."""
+        shown: tuple[float, str] | None = None
+        while not job.wait(POLL_SECONDS):
+            if job.progress != shown:
+                shown = job.progress
+                yield f"{shown[1]}… {shown[0]:.0%}"
+
+    @staticmethod
+    def _result(job: Job[T]) -> T:
+        """The job's result; surfaces warnings, maps errors to ``gr.Error``. ``Cancelled``
+        propagates."""
+        try:
+            return job.result()
+        except Cancelled:
+            raise
+        except Exception as e:
+            log.exception("job failed")
+            raise gr.Error(str(e)) from e
+        finally:
+            for message in job.warnings:
+                gr.Warning(message)
+
+    # --- compare and batch ----------------------------------------------------------------
+
+    def compare(
+        self, image_path: str | None, model_ids: list[str], device_name: str, *values: Any
+    ) -> Iterator[tuple[Any, str]]:
+        """Run the image through several models (each with its current settings)."""
+        if not image_path:
+            raise gr.Error("Upload an image first.")
+        if not model_ids:
+            raise gr.Error("Select at least one model to compare.")
+        try:
+            settings = {mid: self.split_values(mid, values) for mid in model_ids}
+            device = select_device(device_name)
+        except ValueError as e:
+            raise gr.Error(str(e)) from e
+        path = Path(image_path)
+
+        def job_fn(ctx: JobContext) -> list[tuple[np.ndarray, str]]:
+            image = self.session.load(path)
+            results = []
+            for i, (mid, (params, post)) in enumerate(settings.items()):
+                name = self.models[mid].display_name
+                ctx.progress(i / len(settings), f"{i + 1}/{len(settings)}: {name}")
+                ab = self.session.get_ab(image, mid, params, device)
+                results.append((to_uint8(render(image.src, ab, post)), self.caption(mid, params)))
+            return results
+
+        job = self._submit(job_fn)
+        try:
+            for progress in self._follow(job):
+                yield gr.skip(), progress
+            try:
+                results = self._result(job)
+            except Cancelled:
+                yield gr.skip(), "Cancelled."
+                return
+            yield results, f"Compared {len(results)} models."
+        finally:
+            job.cancel()
+
+    def caption(self, model_id: str, params: dict[str, Any]) -> str:
+        shown = ", ".join(f"{k}={v}" for k, v in params.items() if not isinstance(v, list))
+        name = self.models[model_id].display_name
+        return f"{name} ({shown})" if shown else name
+
+    def batch(
+        self,
+        files: list[str] | None,
+        model_id: str,
+        device_name: str,
+        fmt: str,
+        quality: float,
+        out_dir: str,
+        overwrite: bool,
+        *values: Any,
+    ) -> Iterator[tuple[Any, str]]:
+        """Colorize uploaded files into ``out_dir`` as ``<name>_colorized.<ext>``."""
+        if not files:
+            raise gr.Error("Add some images to the batch first.")
+        if not out_dir.strip():
+            raise gr.Error("Choose an output folder.")
+        try:
+            params, post = self.split_values(model_id, values)
+            device = select_device(device_name)
+        except ValueError as e:
+            raise gr.Error(str(e)) from e
+        folder = Path(out_dir.strip()).expanduser()
+        out_fmt: OutputFormat = fmt  # type: ignore[assignment]
+        items = [
+            BatchItem(Path(f), folder / f"{Path(f).stem}_colorized{EXTENSIONS[fmt]}", out_fmt)
+            for f in files
+        ]
+
+        def job_fn(ctx: JobContext) -> BatchResult:
+            return run_batch(
+                items,
+                lambda: self.registry.get(model_id, device),
+                params,
+                post,
+                quality=int(quality),
+                overwrite=overwrite,
+                ctx=ctx,
+            )
+
+        job = self._submit(job_fn)
+        try:
+            for progress in self._follow(job):
+                yield gr.skip(), progress
+            try:
+                result = self._result(job)
+            except Cancelled:
+                yield gr.skip(), "Cancelled (files finished so far were kept)."
+                return
+            if result.done or result.skipped:
+                self._remember_save_dir(folder)
+            lines = [f"{result.summary()} → `{folder}`"]
+            lines += [f"- skipped (exists): {i.dst.name}" for i in result.skipped]
+            lines += [f"- **failed** {i.src.name}: {err}" for i, err in result.failed]
+            yield self._thumbnails(result.done), "\n".join(lines)
+        finally:
+            job.cancel()
+
+    def _thumbnails(self, items: list[BatchItem]) -> list[tuple[str, str]]:
+        """Small copies in the served temp dir (outputs may live anywhere on disk)."""
+        from PIL import Image
+
+        thumbs = []
+        for item in items:
+            thumb = self.output_dir / "thumbs" / f"{item.dst.stem}.png"
+            thumb.parent.mkdir(parents=True, exist_ok=True)
+            with Image.open(item.dst) as im:
+                im.thumbnail((THUMB_SIZE, THUMB_SIZE))
+                im.convert("RGB").save(thumb)
+            thumbs.append((str(thumb), item.dst.name))
+        return thumbs
+
+    def suggest_batch_dir(self) -> str:
+        return str(self.last_save_dir / "colorized")
+
+    def browse_batch_dir(self, current: str) -> tuple[Any, Any]:
+        start = Path(current.strip()).expanduser() if current.strip() else self.last_save_dir
+        while not start.is_dir() and start != start.parent:
+            start = start.parent
+        try:
+            chosen = file_dialog.ask_directory(start)
+        except file_dialog.DialogUnavailable as e:
+            return gr.skip(), f"{e}. Type the folder path instead."
+        return (str(chosen), "") if chosen else (gr.skip(), "")
+
+    # --- presets --------------------------------------------------------------------------
+
+    def preset_names(self) -> list[str]:
+        return presets.list_presets(self.presets_dir)
+
+    def save_preset(self, name: str, model_id: str, *values: Any) -> tuple[Any, str]:
+        try:
+            name = presets.check_name(name)
+            params, post = self.split_values(model_id, values)
+        except ValueError as e:
+            return gr.skip(), f"Can't save preset: {e}."
+        preset = presets.Preset(model_id, params, post.to_dict())
+        presets.save_preset(name, preset, self.presets_dir)
+        return gr.update(choices=self.preset_names(), value=name), f"Saved preset **{name}**."
+
+    def load_preset(self, name: str | None) -> list[Any]:
+        """Set the model, its widgets and postprocess from a preset (other models untouched)."""
+        n_out = 1 + len(self.slots) + len(POSTPROCESS_PARAMS)
+        if not name:
+            return [gr.skip()] * n_out + ["Pick a preset to load."]
+        try:
+            preset = presets.load_preset(name, self.presets_dir).validate(self.registry)
+        except ValueError as e:
+            return [gr.skip()] * n_out + [f"Can't load preset: {e}"]
+        if preset.model not in self.models:
+            return [gr.skip()] * n_out + [f"Preset uses unavailable model {preset.model!r}."]
+        slot_values = [
+            _to_widget(s.param, preset.params[s.param.name])
+            if s.model_id == preset.model
+            else gr.skip()
+            for s in self.slots
+        ]
+        post_values = [preset.postprocess[p.name] for p in POSTPROCESS_PARAMS]
+        status = f"Loaded preset **{name}**. Press **Colorize** to apply."
+        return [preset.model, *slot_values, *post_values, status]
+
+    def delete_preset(self, name: str | None) -> tuple[Any, str]:
+        if not name:
+            return gr.skip(), "Pick a preset to delete."
+        try:
+            presets.delete_preset(name, self.presets_dir)
+        except ValueError as e:
+            return gr.skip(), str(e)
+        return gr.update(choices=self.preset_names(), value=None), f"Deleted preset **{name}**."
 
     def suggest_save_path(self, image_path: str | None, fmt: str) -> Any:
         """Default "Save to" path for a newly loaded image."""
@@ -374,9 +592,34 @@ class App:
         return (before, after), str(out), "Updated (no re-inference)."
 
     def select_model(self, model_id: str) -> list[Any]:
-        return [gr.update(visible=mid == model_id) for mid in self.models] + [
-            self.model_info(model_id)
+        return [
+            *(gr.update(visible=mid == model_id) for mid in self.models),
+            self.model_info(model_id),
+            gr.update(visible=self.has_points(model_id)),
         ]
+
+    # --- point hints (any model with a "points" param) ------------------------------------
+
+    def point_slots(self) -> list[int]:
+        """Indices into ``self.slots`` of every ``points`` param."""
+        return [i for i, s in enumerate(self.slots) if s.param.kind == "points"]
+
+    def has_points(self, model_id: str) -> bool:
+        return any(self.slots[i].model_id == model_id for i in self.point_slots())
+
+    def add_point(self, current: str, x: int, y: int, color: str) -> str:
+        """Append ``(x, y, color)`` to a points widget's JSON value."""
+        slot = next(self.slots[i] for i in self.point_slots())
+        points = widget_value(Param("p", "points", []), current) if current else []
+        points.append((int(x), int(y), parse_color(color)))
+        return _to_widget(slot.param, points)
+
+    @staticmethod
+    def remove_point(current: str, index: int) -> str:
+        points = json.loads(current) if current.strip() else []
+        if 0 <= index < len(points):
+            points.pop(index)
+        return json.dumps(points)
 
     def model_info(self, model_id: str) -> str:
         cls = self.models[model_id]
@@ -388,9 +631,11 @@ class App:
         first = next(iter(self.models))
         devices = ["auto"] + [d.name for d in available_devices()]
         env_device = os.environ.get(ENV_DEVICE, "auto").lower()
+        dialogs = file_dialog.available()
 
         with gr.Blocks(title="Colorizer", analytics_enabled=False) as demo:
             with gr.Row():
+                # Left: the photo and every setting; shared by all tabs on the right.
                 with gr.Column(scale=1, min_width=320):
                     image = gr.Image(
                         type="filepath",
@@ -410,11 +655,57 @@ class App:
                         with gr.Group(visible=mid == first) as group:
                             model_widgets.extend(widget_for(p) for p in cls.params)
                         groups.append(group)
+                    point_widgets = [model_widgets[i] for i in self.point_slots()]
+                    with gr.Group(visible=self.has_points(first)) as hints_group:
+                        gr.Markdown(
+                            "**Colour hints:** pick a colour, then click the photo where it "
+                            "belongs. The result updates after each change."
+                        )
+                        with gr.Row(equal_height=True):
+                            hint_color = gr.ColorPicker("#3c78c8", label="Hint colour", scale=1)
+                            clear_hints_btn = gr.Button("Clear hints", scale=1)
+
+                        @gr.render(inputs=[model_dd, *point_widgets])
+                        def hint_list(model_id: str, *values: str) -> None:
+                            for slot_index, widget, value in zip(
+                                self.point_slots(), point_widgets, values, strict=True
+                            ):
+                                if self.slots[slot_index].model_id != model_id:
+                                    continue
+                                points = json.loads(value) if value and value.strip() else []
+                                if not points:
+                                    gr.Markdown("*No hints yet.*")
+                                for i, (x, y, rgb) in enumerate(points):
+                                    with gr.Row(equal_height=True):
+                                        gr.HTML(
+                                            f'<span style="display:inline-block;width:1.2em;'
+                                            f"height:1.2em;border-radius:3px;vertical-align:middle;"
+                                            f'background:{hex_color(rgb)}"></span>'
+                                            f"&nbsp; ({x}, {y}) {hex_color(rgb)}"
+                                        )
+                                        delete = gr.Button("✕", size="sm", scale=0, min_width=40)
+                                    delete.click(
+                                        lambda current, i=i: self.remove_point(current, i),
+                                        widget,
+                                        widget,
+                                        api_name=False,
+                                    )
+
                     with gr.Row():
                         run_btn = gr.Button("Colorize", variant="primary")
                         cancel_btn = gr.Button("Cancel", variant="stop")
                     with gr.Accordion("Postprocess", open=True):
                         post_widgets = [widget_for(p) for p in POSTPROCESS_PARAMS]
+                    with gr.Accordion("Presets", open=False):
+                        preset_dd = gr.Dropdown(
+                            self.preset_names(), value=None, label="Preset", interactive=True
+                        )
+                        with gr.Row():
+                            load_preset_btn = gr.Button("Load")
+                            delete_preset_btn = gr.Button("Delete")
+                        with gr.Row(equal_height=True):
+                            preset_name = gr.Textbox(label="Save current settings as", scale=3)
+                            save_preset_btn = gr.Button("Save preset", scale=1)
                     with gr.Accordion("Output & device", open=False):
                         device_dd = gr.Dropdown(
                             devices,
@@ -424,37 +715,98 @@ class App:
                         fmt_dd = gr.Dropdown(list(EXTENSIONS), value="png", label="Format")
                         quality = gr.Slider(50, 100, value=95, step=1, label="JPEG quality")
                 with gr.Column(scale=2):
-                    # Lossless preview: Gradio's default WebP is lossy, and right-click
-                    # "Save image as" saves these bytes. The download button gives the
-                    # real output file in the chosen format.
-                    slider = gr.ImageSlider(
-                        label="Before / after", type="numpy", format="png", max_height=720
-                    )
-                    with gr.Row():
-                        download = gr.DownloadButton("Download result", value=None)
-                    with gr.Row(equal_height=True):
-                        save_path = gr.Textbox(
-                            label="Save to",
-                            info="Full path; the extension (.png, .jpg, .tif) sets the format.",
-                            scale=5,
-                        )
-                        with gr.Column(scale=1, min_width=140):
-                            overwrite = gr.Checkbox(label="Overwrite", value=False)
-                            save_btn = gr.Button("Save")
-                            save_as_btn = gr.Button("Save as…", visible=file_dialog.available())
                     status = gr.Markdown()
+                    with gr.Tabs():
+                        with gr.Tab("Result"):
+                            # Lossless preview: Gradio's default WebP is lossy, and right-click
+                            # "Save image as" saves these bytes. The download button gives the
+                            # real output file in the chosen format.
+                            slider = gr.ImageSlider(
+                                label="Before / after", type="numpy", format="png", max_height=720
+                            )
+                            with gr.Row():
+                                download = gr.DownloadButton("Download result", value=None)
+                            with gr.Row(equal_height=True):
+                                save_path = gr.Textbox(
+                                    label="Save to",
+                                    info="Full path; the extension (.png, .jpg, .tif) sets the "
+                                    "format.",
+                                    scale=5,
+                                )
+                                with gr.Column(scale=1, min_width=140):
+                                    overwrite = gr.Checkbox(label="Overwrite", value=False)
+                                    save_btn = gr.Button("Save")
+                                    save_as_btn = gr.Button("Save as…", visible=dialogs)
+                        with gr.Tab("Compare models"):
+                            compare_models = gr.CheckboxGroup(
+                                [(cls.display_name, mid) for mid, cls in self.models.items()],
+                                value=list(self.models),
+                                label="Models (each uses its current settings on the left)",
+                            )
+                            compare_btn = gr.Button("Compare", variant="primary")
+                            compare_gallery = gr.Gallery(
+                                label="Results", columns=3, format="png", object_fit="contain"
+                            )
+                        with gr.Tab("Batch"):
+                            batch_files = gr.File(
+                                label="Photos", file_count="multiple", file_types=["image"]
+                            )
+                            with gr.Row(equal_height=True):
+                                batch_dir = gr.Textbox(
+                                    self.suggest_batch_dir(),
+                                    label="Output folder",
+                                    info="Files are saved as <name>_colorized.<format>.",
+                                    scale=5,
+                                )
+                                browse_dir_btn = gr.Button(
+                                    "Browse…", visible=dialogs, scale=1, min_width=120
+                                )
+                            batch_overwrite = gr.Checkbox(label="Overwrite existing files")
+                            batch_btn = gr.Button(
+                                "Colorize all with current settings", variant="primary"
+                            )
+                            batch_gallery = gr.Gallery(label="Done", columns=4, format="png")
 
             values = [*model_widgets, *post_widgets]
             outputs = [slider, download, status]
 
-            model_dd.change(self.select_model, model_dd, [*groups, model_info], api_name=False)
+            model_dd.change(
+                self.select_model, model_dd, [*groups, model_info, hints_group], api_name=False
+            )
             run = run_btn.click(
                 self.colorize,
                 [image, model_dd, device_dd, fmt_dd, quality, *values],
                 outputs,
                 api_name="colorize",
             )
-            cancel_btn.click(self.cancel, None, status, cancels=[run], api_name="cancel")
+            compare = compare_btn.click(
+                self.compare,
+                [image, compare_models, device_dd, *values],
+                [compare_gallery, status],
+                api_name="compare",
+            )
+            batch = batch_btn.click(
+                self.batch,
+                [
+                    batch_files,
+                    model_dd,
+                    device_dd,
+                    fmt_dd,
+                    quality,
+                    batch_dir,
+                    batch_overwrite,
+                    *values,
+                ],
+                [batch_gallery, status],
+                api_name="batch",
+            )
+            cancel_btn.click(
+                self.cancel, None, status, cancels=[run, compare, batch], api_name="cancel"
+            )
+            browse_dir_btn.click(
+                self.browse_batch_dir, batch_dir, [batch_dir, status], api_name=False
+            )
+
             rerender_inputs = [image, model_dd, fmt_dd, quality, *values]
             # Sliders fire on release, not on every drag step. The first one also exposes
             # the named "rerender" API endpoint (used by scripts and tests).
@@ -466,14 +818,53 @@ class App:
                     outputs,
                     api_name="rerender" if i == 0 else False,
                 )
+            for w in (fmt_dd, quality):
+                event = w.release if isinstance(w, gr.Slider) else w.change
+                event(self.rerender, rerender_inputs, outputs, api_name=False)
+
+            run_inputs = [image, model_dd, device_dd, fmt_dd, quality, *values]
+            for slot_index, widget in zip(self.point_slots(), point_widgets, strict=True):
+                slot_model = self.slots[slot_index].model_id
+
+                def on_click(
+                    model_id: str,
+                    current: str,
+                    color: str,
+                    evt: gr.SelectData,
+                    slot_model: str = slot_model,
+                ) -> Any:
+                    if model_id != slot_model or evt.index is None:
+                        return gr.skip()
+                    x, y = evt.index
+                    return self.add_point(current, x, y, color)
+
+                image.select(on_click, [model_dd, widget, hint_color], widget, api_name=False)
+
+                def on_hints_changed(
+                    *args: Any, slot_model: str = slot_model
+                ) -> Iterator[tuple[Any, Any, str]]:
+                    if not args[0] or args[1] != slot_model:
+                        yield gr.skip(), gr.skip(), gr.skip()
+                        return
+                    yield from self.colorize(*args)
+
+                widget.change(on_hints_changed, run_inputs, outputs, api_name=False)
+            clear_hints_btn.click(
+                lambda *_: ["[]"] * len(point_widgets), None, point_widgets, api_name=False
+            )
             image.change(self.suggest_save_path, [image, fmt_dd], save_path, api_name=False)
             fmt_dd.change(self.retarget_extension, [save_path, fmt_dd], save_path, api_name=False)
             save_inputs = [image, model_dd, fmt_dd, quality, save_path, overwrite, *values]
             save_btn.click(self.save_to, save_inputs, [save_path, status], api_name="save")
             save_as_btn.click(self.save_as, save_inputs, [save_path, status], api_name=False)
-            for w in (fmt_dd, quality):
-                event = w.release if isinstance(w, gr.Slider) else w.change
-                event(self.rerender, rerender_inputs, outputs, api_name=False)
+
+            save_preset_btn.click(
+                self.save_preset, [preset_name, model_dd, *values], [preset_dd, status]
+            )
+            load_preset_btn.click(
+                self.load_preset, preset_dd, [model_dd, *values, status], api_name="load_preset"
+            )
+            delete_preset_btn.click(self.delete_preset, preset_dd, [preset_dd, status])
         return demo
 
 

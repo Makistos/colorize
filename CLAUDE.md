@@ -19,7 +19,7 @@ uv run colorizer-ui           # launch Gradio UI (http://127.0.0.1:7860)
 uv run colorizer in/ out/ --model ddcolor --param size=512   # batch CLI
 uv run pytest                 # tests
 COLORIZER_TEST_WEIGHTS=1 uv run pytest -m weights   # real-model tests
-uv run --group export python tools/export_onnx/zhang.py   # one-time ONNX export (CPU torch)
+uv run --group export python tools/export_onnx/zhang.py   # ECCV16 + SIGGRAPH17 ONNX export (CPU torch)
 uv run --group export python tools/export_onnx/deoldify.py   # DeOldify, rebuilt without fastai
 uv run --group export python tools/export_onnx/ddcolor.py    # DDColor, uses upstream code at a pinned commit
 uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
@@ -38,6 +38,8 @@ src/colorizer/
     runtime.py     # device / ONNX execution provider selection
     weights.py     # download, cache (~/.cache/colorizer), checksum
     worker.py      # background job queue, cancellation, progress
+    batch.py       # many files, one model/settings (CLI + UI batch)
+    presets.py     # named {model, params, postprocess} JSON presets
     session.py     # UI caches: decoded images + ab per image/model/params hash
   models/
     zhang.py       # ECCV16 + SIGGRAPH17 (with user hints)
@@ -130,7 +132,7 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 - Save to a chosen path: "Save to" textbox (extension sets the format; default `<last dir>/<stem>_colorized.<ext>`), "Save" (refuses to overwrite unless ticked) and "Save as…" (native dialog via kdialog/zenity/tkinter in a subprocess, `ui/file_dialog.py`). Last folder is stored in `~/.config/colorizer/ui.json`.
 - "Compare models" tab runs the same image through N selected models and shows a grid.
 - Presets: save/load JSON `{model, params, postprocess}` in `~/.config/colorizer/presets/`.
-- SIGGRAPH17 hints: click on the image to add a point, pick a color, and see the list of points with delete buttons.
+- SIGGRAPH17 hints: click on the image to add a point, pick a color, and see the list of points with delete buttons. Implemented generically for any `points` param; the result re-colorizes after each change. The released weights take the hint mask uncentered (0/1); see `tools/export_onnx/zhang.py`.
 - Progress and cancel for long jobs (via worker.py).
 - Model param panels are visibility-toggled groups built at startup (fixed API endpoints `/colorize`, `/rerender`, `/cancel`).
 - Gradio telemetry and update checks are disabled (local-first).
@@ -206,7 +208,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestones 1-3 done (2026-10-06). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
+Status: milestones 1-4 done (2026-10-06). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.

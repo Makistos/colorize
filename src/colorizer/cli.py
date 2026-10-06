@@ -7,7 +7,6 @@ colorizer INPUT OUTPUT [--model ID] [--param k=v ...] [--preset FILE] [--device 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from collections.abc import Sequence
@@ -15,10 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from colorizer.core import pipeline
+from colorizer.core.batch import BatchItem, run_batch
 from colorizer.core.params import parse_params
 from colorizer.core.pipeline import EXTENSIONS, INPUT_SUFFIXES, SUFFIX_FORMATS, OutputFormat
 from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
+from colorizer.core.presets import load_preset
 from colorizer.core.registry import Registry, default_registry
 from colorizer.core.runtime import select_device
 
@@ -34,13 +34,6 @@ class Settings:
     post: Postprocess = field(default_factory=Postprocess)
 
 
-@dataclass
-class Summary:
-    done: int = 0
-    skipped: int = 0
-    failed: list[Path] = field(default_factory=list)
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="colorizer", description="Colorize black-and-white photos.")
     p.add_argument("input", type=Path, nargs="?", help="image file or directory")
@@ -53,7 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="K=V",
         help="model or postprocess parameter; repeatable",
     )
-    p.add_argument("--preset", type=Path, help="JSON preset {model, params, postprocess}")
+    p.add_argument(
+        "--preset", help="preset name (from the UI) or JSON file {model, params, postprocess}"
+    )
     p.add_argument("--device", help="auto, cpu, cuda, rocm, directml, coreml")
     p.add_argument("--format", choices=list(EXTENSIONS), help="output format")
     p.add_argument("--quality", type=int, default=95, help="JPEG quality (default 95)")
@@ -66,23 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_settings(args: argparse.Namespace, registry: Registry) -> Settings:
     """Merge preset and CLI arguments, validating everything. Raises ``ValueError``."""
-    preset: dict[str, Any] = {}
-    if args.preset:
-        try:
-            preset = json.loads(args.preset.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            raise ValueError(f"cannot read preset {args.preset}: {e}") from e
-        if not isinstance(preset, dict):
-            raise ValueError(f"preset {args.preset} must be a JSON object")
+    preset = load_preset(args.preset) if args.preset else None
 
-    model_id = args.model or preset.get("model") or DEFAULT_MODEL
+    model_id = args.model or (preset.model if preset else DEFAULT_MODEL)
     model_cls = registry.get_class(model_id)
     params: dict[str, Any] = {}
-    if preset.get("model") in (None, model_id):
-        params.update(preset.get("params") or {})
-    elif preset.get("params"):
-        log.warning("ignoring preset params for %s (using --model %s)", preset["model"], model_id)
-    post_values: dict[str, Any] = dict(preset.get("postprocess") or {})
+    if preset and preset.model == model_id:
+        params.update(preset.params)
+    elif preset and preset.params:
+        log.warning("ignoring preset params for %s (using --model %s)", preset.model, model_id)
+    post_values: dict[str, Any] = dict(preset.postprocess) if preset else {}
 
     model_names = {p.name for p in model_cls.params}
     post_names = {p.name for p in POSTPROCESS_PARAMS}
@@ -169,40 +157,23 @@ def main(argv: Sequence[str] | None = None, registry: Registry | None = None) ->
         log.error("error: no images found in %s", args.input)
         return 1
 
-    summary = Summary()
-    pending = []
-    for job in jobs:
-        if job[1].exists() and not args.overwrite:
-            log.info("skip %s (exists)", job[1])
-            summary.skipped += 1
-        else:
-            pending.append(job)
-
-    if pending:
-        try:
-            model = registry.get(settings.model, device)
-        except Exception as e:
-            log.error("error: cannot load %s: %s", settings.model, e)
-            return 1
-        for i, (src, dst, fmt) in enumerate(pending, 1):
-            try:
-                pipeline.colorize_file(
-                    src, dst, model, settings.params, settings.post, fmt=fmt, quality=args.quality
-                )
-            except Exception as e:
-                log.error("[%d/%d] FAILED %s: %s", i, len(pending), src, e)
-                log.debug("traceback", exc_info=True)
-                summary.failed.append(src)
-            else:
-                log.info("[%d/%d] %s -> %s", i, len(pending), src, dst)
-                summary.done += 1
-
-    log.info(
-        "%d colorized, %d skipped, %d failed", summary.done, summary.skipped, len(summary.failed)
-    )
-    for path in summary.failed:
-        log.info("  failed: %s", path)
-    return 1 if summary.failed else 0
+    items = [BatchItem(src, dst, fmt) for src, dst, fmt in jobs]
+    try:
+        result = run_batch(
+            items,
+            lambda: registry.get(settings.model, device),
+            settings.params,
+            settings.post,
+            quality=args.quality,
+            overwrite=args.overwrite,
+        )
+    except Exception as e:  # per-file errors are collected; this is a model load failure
+        log.error("error: cannot load %s: %s", settings.model, e)
+        return 1
+    log.info("%s", result.summary())
+    for item, _ in result.failed:
+        log.info("  failed: %s", item.src)
+    return 1 if result.failed else 0
 
 
 if __name__ == "__main__":

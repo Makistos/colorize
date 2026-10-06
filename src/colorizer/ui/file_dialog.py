@@ -17,6 +17,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 TITLE = "Save colorized image"
+DIR_TITLE = "Choose output folder"
 _PATTERNS = "*.png *.jpg *.jpeg *.tif *.tiff"
 
 # Exits 0 with the path (empty if cancelled) or 3 on error, so failures aren't mistaken
@@ -29,10 +30,13 @@ try:
     from tkinter import filedialog
     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
     initial = Path(sys.argv[1])
-    path = filedialog.asksaveasfilename(
-        title=sys.argv[2], initialdir=str(initial.parent), initialfile=initial.name,
-        filetypes=[("Images", sys.argv[3]), ("All files", "*")],
-    )
+    if sys.argv[4] == "dir":
+        path = filedialog.askdirectory(title=sys.argv[2], initialdir=str(initial))
+    else:
+        path = filedialog.asksaveasfilename(
+            title=sys.argv[2], initialdir=str(initial.parent), initialfile=initial.name,
+            filetypes=[("Images", sys.argv[3]), ("All files", "*")],
+        )
 except Exception as e:
     print(e, file=sys.stderr)
     sys.exit(3)
@@ -52,29 +56,39 @@ def _has_tk() -> bool:
     return True
 
 
-def _commands(initial: Path) -> list[list[str]]:
+def _commands(initial: Path, directory: bool = False) -> list[list[str]]:
     cmds: list[list[str]] = []
     if sys.platform.startswith("linux"):
         if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
             return []  # headless: no dialog can be shown
         kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
-        kdialog = [
-            "kdialog",
-            "--title",
-            TITLE,
-            "--getsavefilename",
-            str(initial),
-            f"Images ({_PATTERNS})",
-        ]
-        # zenity >= 4 asks before overwriting by default.
-        zenity = [
-            "zenity",
-            "--file-selection",
-            "--save",
-            f"--title={TITLE}",
-            f"--filename={initial}",
-            f"--file-filter=Images | {_PATTERNS}",
-        ]
+        if directory:
+            kdialog = ["kdialog", "--title", DIR_TITLE, "--getexistingdirectory", str(initial)]
+            zenity = [
+                "zenity",
+                "--file-selection",
+                "--directory",
+                f"--title={DIR_TITLE}",
+                f"--filename={initial}/",
+            ]
+        else:
+            kdialog = [
+                "kdialog",
+                "--title",
+                TITLE,
+                "--getsavefilename",
+                str(initial),
+                f"Images ({_PATTERNS})",
+            ]
+            # zenity >= 4 asks before overwriting by default.
+            zenity = [
+                "zenity",
+                "--file-selection",
+                "--save",
+                f"--title={TITLE}",
+                f"--filename={initial}",
+                f"--file-filter=Images | {_PATTERNS}",
+            ]
         for name, cmd in (
             (("kdialog", kdialog), ("zenity", zenity))
             if kde
@@ -83,7 +97,9 @@ def _commands(initial: Path) -> list[list[str]]:
             if shutil.which(name):
                 cmds.append(cmd)
     if _has_tk():
-        cmds.append([sys.executable, "-c", _TK_SCRIPT, str(initial), TITLE, _PATTERNS])
+        mode = "dir" if directory else "save"
+        title = DIR_TITLE if directory else TITLE
+        cmds.append([sys.executable, "-c", _TK_SCRIPT, str(initial), title, _PATTERNS, mode])
     return cmds
 
 
@@ -96,7 +112,16 @@ def ask_save_path(initial: Path) -> Path | None:
 
     Raises ``DialogUnavailable`` if no dialog could be shown.
     """
-    for cmd in _commands(initial):
+    return _ask(_commands(initial))
+
+
+def ask_directory(initial: Path) -> Path | None:
+    """Show a native folder picker; like ``ask_save_path``."""
+    return _ask(_commands(initial, directory=True))
+
+
+def _ask(commands: list[list[str]]) -> Path | None:
+    for cmd in commands:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         except OSError as e:

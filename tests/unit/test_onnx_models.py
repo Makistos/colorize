@@ -102,3 +102,14 @@ def test_sessions_created_per_variant_on_demand(tmp_path, monkeypatch, L):
     assert created == ["deoldify_stable.onnx", "deoldify_artistic.onnx"]
     model.unload()
     assert model._sessions == {}
+
+
+def test_siggraph_hint_encoding():
+    from colorizer.models.zhang import encode_hints
+
+    ab, mask = encode_hints([(50, 20, (255, 0, 0)), (999, 5, (0, 0, 255))], (40, 100), 256)
+    assert ab.shape == (2, 256, 256) and mask.shape == (1, 256, 256)
+    cy, cx = int(20 * 256 / 40), int(50 * 256 / 100)
+    assert mask[0, cy, cx] == 1 and mask.sum() == 9  # one 3x3 patch; off-image point ignored
+    assert ab[0, cy, cx] > 50 and ab[1, cy, cx] > 40  # red: +a, +b
+    assert np.all(ab[:, mask[0] == 0] == 0)

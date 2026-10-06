@@ -258,3 +258,99 @@ def test_save_as_cancel_and_unavailable(app, image_path, monkeypatch):
     monkeypatch.setattr(file_dialog, "ask_save_path", unavailable)
     status = app.save_as(image_path, "dummy", "png", 90, "", False, *defaults(app))[1]
     assert "Save to" in status
+
+
+# --- presets, compare, batch -----------------------------------------------------------
+
+
+def test_preset_roundtrip_sets_widgets(app):
+    values = defaults(app)
+    values[0] = 64  # dummy size
+    values[-5] = 1.5  # saturation
+    dd, status = app.save_preset("Strong", "dummy", *values)
+    assert dd["choices"] and "Saved" in status
+    out = app.load_preset("Strong")
+    model, *rest, status = out
+    assert model == "dummy" and "Loaded" in status
+    assert rest[0] == 64 and rest[len(app.slots)] == 1.5
+
+
+def test_preset_errors(app):
+    assert "Pick" in app.load_preset(None)[-1]
+    assert "Can't load" in app.load_preset("missing")[-1]
+    assert "Can't save" in app.save_preset("../x", "dummy", *defaults(app))[1]
+
+
+def test_compare_runs_each_model_once(app, image_path, registry):
+    other = type("Other", (DummyModel,), {"id": "other", "display_name": "Other"})
+    registry.register(other)
+    app2 = App(registry=registry, output_dir=app.output_dir, config_dir=app.config_dir)
+    vals = [s.param.default for s in app2.slots] + [p.default for p in POSTPROCESS_PARAMS]
+    *_, (gallery, status) = app2.compare(image_path, ["dummy", "other"], "cpu", *vals)
+    assert [c for _, c in gallery] == [
+        "Dummy (size=32, a=10.0, b=-20.0)",
+        "Other (size=32, a=10.0, b=-20.0)",
+    ]
+    assert gallery[0][0].shape == (40, 50, 3) and "2 models" in status
+    *_, (_, _) = app2.compare(image_path, ["dummy"], "cpu", *vals)
+    assert app2.session.inference_count == 2  # second compare hit the cache
+    app2.worker.shutdown()
+
+
+def test_compare_needs_models(app, image_path):
+    with pytest.raises(gr.Error):
+        next(app.compare(image_path, [], "cpu", *defaults(app)))
+
+
+@pytest.mark.filterwarnings("ignore:.*FAILED.*broken.png")  # surfaced as a UI warning
+def test_batch_writes_skips_and_reports_failures(app, tmp_path):
+    files = []
+    for name in ("a", "b"):
+        p = tmp_path / f"{name}.png"
+        Image.fromarray(np.full((20, 30), 120, np.uint8)).save(p)
+        files.append(str(p))
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"nope")
+    out = tmp_path / "batch-out"
+    out.mkdir()
+    (out / "b_colorized.jpg").write_bytes(b"existing")
+    *_, (gallery, status) = app.batch(
+        [*files, str(broken)], "dummy", "cpu", "jpg", 90, str(out), False, *defaults(app)
+    )
+    assert Image.open(out / "a_colorized.jpg").format == "JPEG"
+    assert (out / "b_colorized.jpg").read_bytes() == b"existing"
+    assert "1 colorized, 1 skipped, 1 failed" in status and "broken.png" in status
+    assert [c for _, c in gallery] == ["a_colorized.jpg"]
+    assert app.last_save_dir == out
+
+
+def test_batch_needs_files_and_folder(app):
+    with pytest.raises(gr.Error):
+        next(app.batch([], "dummy", "cpu", "png", 90, "/tmp", False, *defaults(app)))
+    with pytest.raises(gr.Error):
+        next(app.batch(["x.png"], "dummy", "cpu", "png", 90, " ", False, *defaults(app)))
+
+
+def test_parse_color_formats():
+    from colorizer.ui.gradio_app import parse_color
+
+    assert parse_color("#3c78c8") == (60, 120, 200)
+    assert parse_color("rgba(60.2, 120, 199.6, 1)") == (60, 120, 200)
+    with pytest.raises(ValueError):
+        parse_color("blue")
+
+
+def test_add_and_remove_points(registry, tmp_path):
+    hinted = type(
+        "Hinted",
+        (DummyModel,),
+        {"id": "hinted", "params": (*DummyModel.params, Param("hints", "points", []))},
+    )
+    registry.register(hinted)
+    app = App(registry=registry, output_dir=tmp_path / "o", config_dir=tmp_path / "c")
+    assert app.has_points("hinted") and not app.has_points("dummy")
+    value = app.add_point("[]", 10, 20, "#ff0000")
+    value = app.add_point(value, 30, 40, "#00ff00")
+    assert json.loads(value) == [[10, 20, [255, 0, 0]], [30, 40, [0, 255, 0]]]
+    assert json.loads(app.remove_point(value, 0)) == [[30, 40, [0, 255, 0]]]
+    app.worker.shutdown()
