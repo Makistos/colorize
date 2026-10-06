@@ -3,6 +3,8 @@ name = "colorizer"
 version = "0.1.0"
 description = "Local-first AI colorization of black-and-white photographs"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "numpy>=1.26",
     "pillow>=10.3",
