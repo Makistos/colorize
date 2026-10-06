@@ -1,0 +1,29 @@
+name: Model tests
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  weights:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Cache weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/colorizer
+          key: weights-${{ hashFiles('src/colorizer/models/*.py', 'tools/export_onnx/*.py') }}
+      # No hosted ONNX builds yet: export from the official checkpoints (CPU torch).
+      - name: Export ONNX models
+        run: |
+          if [ ! -f ~/.cache/colorizer/zhang_eccv16.onnx ]; then
+            uv run --locked --group export python tools/export_onnx/zhang.py
+          fi
+      - run: uv run --locked pytest -m weights
+        env:
+          COLORIZER_TEST_WEIGHTS: "1"

@@ -1,0 +1,82 @@
+[project]
+name = "colorizer"
+version = "0.1.0"
+description = "Local-first AI colorization of black-and-white photographs"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.3",
+    "opencv-python-headless>=4.9",
+    "scikit-image>=0.22",
+    "onnxruntime>=1.18",
+]
+
+[project.scripts]
+colorizer = "colorizer.cli:main"
+
+[project.entry-points."colorizer.models"]
+# Third-party packages register models here, e.g. `mymodel = "pkg.module:MyModel"`.
+# Built-ins live in colorizer.core.registry.BUILTIN_MODELS.
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+# Only needed to run tools/export_onnx/*. Never imported at runtime.
+export = [
+    "torch>=2.3",
+    "onnx>=1.16",
+    "onnxscript>=0.1",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/colorizer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# Lab channel names (L, ab) are conventional uppercase in this domain.
+ignore = ["N803", "N806"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/colorizer/core"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*", "skimage", "skimage.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "weights: needs downloaded model weights (set COLORIZER_TEST_WEIGHTS=1)",
+    "ui: Gradio UI tests",
+    "gpu: needs a GPU execution provider",
+    "diffusion: needs the diffusion extra",
+]
+
+[tool.coverage.run]
+source = ["colorizer"]
