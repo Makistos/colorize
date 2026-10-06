@@ -15,7 +15,8 @@ except ImportError as e:  # pragma: no cover - depends on the installed extra
         "No ONNX Runtime installed. Install exactly one build:\n"
         "    uv sync --extra cpu        # any machine\n"
         "    uv sync --extra cuda       # NVIDIA GPU (Linux/Windows)\n"
-        "    uv sync --extra directml   # DirectX 12 GPU (Windows)"
+        "    uv sync --extra directml   # DirectX 12 GPU (Windows)\n"
+        "    uv sync --extra webgpu     # any GPU via Vulkan/D3D12/Metal (e.g. AMD on Linux)"
     ) from e
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ PROVIDERS: dict[str, str] = {
     "rocm": "ROCMExecutionProvider",
     "directml": "DmlExecutionProvider",
     "coreml": "CoreMLExecutionProvider",
+    # Vulkan/Metal/D3D12 via Dawn; the practical choice for AMD GPUs without ROCm.
+    "webgpu": "WebGpuExecutionProvider",
     "cpu": CPU_PROVIDER,
 }
 

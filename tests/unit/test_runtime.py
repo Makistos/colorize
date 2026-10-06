@@ -82,3 +82,10 @@ def test_cuda_preloads_pip_libraries_once(monkeypatch):
     create_session(Path("b.onnx"), cuda)
     create_session(Path("c.onnx"), Device("directml", "DmlExecutionProvider"))
     assert calls == [1]
+
+
+def test_webgpu_ranks_below_native_gpu_providers_above_cpu(providers):
+    providers(["CPUExecutionProvider", "WebGpuExecutionProvider"])
+    assert select_device().name == "webgpu"
+    providers(["WebGpuExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"])
+    assert select_device().name == "cuda"

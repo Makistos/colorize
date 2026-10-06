@@ -14,7 +14,7 @@ AI colorization of black-and-white photographs. Local-first, cross-platform (Lin
 ## Commands
 
 ```bash
-uv sync --extra cpu           # install (or --extra cuda / --extra directml; exactly one)
+uv sync --extra cpu           # install; or --extra cuda (NVIDIA) / directml (Windows) / webgpu (AMD etc.); exactly one
 uv run colorizer-ui           # launch Gradio UI (http://127.0.0.1:7860)
 uv run colorizer in/ out/ --model ddcolor --param size=512   # batch CLI
 uv run pytest                 # tests
@@ -116,10 +116,10 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 
 ## Runtime (runtime.py)
 
-- ONNX provider priority: CUDA → ROCm → DirectML → CoreML → CPU. Pick the first one listed by `onnxruntime.get_available_providers()`.
+- ONNX provider priority: CUDA → ROCm → DirectML → CoreML → WebGPU → CPU. Pick the first one listed by `onnxruntime.get_available_providers()`. WebGPU (extra `webgpu`, Vulkan via Dawn) is the supported path for AMD GPUs on Linux: the ROCm EP was removed upstream and MIGraphX needs a system ROCm install.
 - Users can force a device via the `COLORIZER_DEVICE` env var or a UI dropdown.
 - If a GPU provider fails on load, fall back to CPU with a visible warning.
-- ONNX Runtime comes from exactly one of the conflicting extras `cpu`, `cuda`, `directml` (they all install the `onnxruntime` module). The `cuda` extra pulls CUDA/cuDNN from PyPI; `runtime.py` calls `onnxruntime.preload_dlls()` so they are found.
+- ONNX Runtime comes from exactly one of the conflicting extras `cpu`, `cuda`, `directml`, `webgpu` (they all install the `onnxruntime` module). The `cuda` extra pulls CUDA/cuDNN from PyPI; `runtime.py` calls `onnxruntime.preload_dlls()` so they are found.
 
 ## UI (gradio_app.py)
 

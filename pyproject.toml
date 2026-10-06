@@ -22,6 +22,11 @@ cpu = ["onnxruntime>=1.18"]
 cuda = ["onnxruntime-gpu[cuda,cudnn]>=1.18; sys_platform == 'linux' or sys_platform == 'win32'"]
 # Any DirectX 12 GPU on Windows.
 directml = ["onnxruntime-directml>=1.18; sys_platform == 'win32'"]
+# Any GPU via WebGPU (Vulkan on Linux, D3D12 on Windows, Metal on macOS); no ROCm or
+# CUDA needed. Tested on AMD Radeon RX 6800 (Navi 21) with Mesa RADV.
+webgpu = [
+    "onnxruntime-webgpu>=1.27; (sys_platform == 'linux' and platform_machine == 'x86_64') or sys_platform == 'win32' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+]
 
 [project.scripts]
 colorizer = "colorizer.cli:main"
@@ -48,7 +53,9 @@ export = [
 
 [tool.uv]
 default-groups = ["dev"]
-conflicts = [[{ extra = "cpu" }, { extra = "cuda" }, { extra = "directml" }]]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cuda" }, { extra = "directml" }, { extra = "webgpu" }],
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
