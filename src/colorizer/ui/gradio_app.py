@@ -289,7 +289,12 @@ class App:
                         fmt_dd = gr.Dropdown(list(EXTENSIONS), value="png", label="Format")
                         quality = gr.Slider(50, 100, value=95, step=1, label="JPEG quality")
                 with gr.Column(scale=2):
-                    slider = gr.ImageSlider(label="Before / after", type="numpy", max_height=720)
+                    # Lossless preview: Gradio's default WebP is lossy, and right-click
+                    # "Save image as" saves these bytes. The download button gives the
+                    # real output file in the chosen format.
+                    slider = gr.ImageSlider(
+                        label="Before / after", type="numpy", format="png", max_height=720
+                    )
                     with gr.Row():
                         download = gr.DownloadButton("Download result", value=None)
                     status = gr.Markdown()
