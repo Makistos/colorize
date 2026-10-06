@@ -17,7 +17,9 @@ pytestmark = pytest.mark.ui
 
 @pytest.fixture
 def app(registry, tmp_path):
-    a = App(registry=registry, output_dir=tmp_path / "out")
+    a = App(registry=registry, output_dir=tmp_path / "out", config_dir=tmp_path / "cfg")
+    a.last_save_dir = tmp_path / "saved"
+    a.last_save_dir.mkdir()
     yield a
     a.worker.shutdown()
 
@@ -166,3 +168,93 @@ def test_end_to_end_via_gradio_client(app, image_path):
         assert app.session.inference_count == 1
     finally:
         demo.close()
+
+
+# --- saving to a chosen path -----------------------------------------------------------
+
+
+def save(app, image_path, dest, overwrite=False, fmt="png"):
+    return app.save_to(image_path, "dummy", fmt, 90, dest, overwrite, *defaults(app))
+
+
+def test_suggested_path_and_extension_follow_format(app, image_path):
+    suggested = app.suggest_save_path(image_path, "jpg")
+    assert suggested == str(app.last_save_dir / "photo_colorized.jpg")
+    assert app.retarget_extension(suggested, "tiff").endswith("photo_colorized.tiff")
+
+
+def test_save_requires_a_result(app, image_path):
+    _, status = save(app, image_path, str(app.last_save_dir / "x.png"))
+    assert "Colorize" in status
+    assert not (app.last_save_dir / "x.png").exists()
+
+
+def test_save_uses_extension_for_format_without_reinference(app, image_path, tmp_path):
+    run_colorize(app, image_path, defaults(app))
+    dest = tmp_path / "elsewhere" / "kuva2.jpg"
+    path, status = save(app, image_path, str(dest), fmt="png")
+    assert path == str(dest) and status.startswith("Saved")
+    assert Image.open(dest).format == "JPEG"
+    assert app.session.inference_count == 1
+
+
+def test_save_remembers_folder_across_sessions(app, registry, image_path, tmp_path):
+    run_colorize(app, image_path, defaults(app))
+    dest = tmp_path / "album" / "a.png"
+    save(app, image_path, str(dest))
+    again = App(registry=registry, output_dir=tmp_path / "o2", config_dir=tmp_path / "cfg")
+    assert again.last_save_dir == dest.parent
+    again.worker.shutdown()
+
+
+def test_existing_file_needs_overwrite(app, image_path):
+    run_colorize(app, image_path, defaults(app))
+    dest = app.last_save_dir / "keep.png"
+    dest.write_bytes(b"original")
+    _, status = save(app, image_path, str(dest))
+    assert "already exists" in status and dest.read_bytes() == b"original"
+    _, status = save(app, image_path, str(dest), overwrite=True)
+    assert status.startswith("Saved") and Image.open(dest).format == "PNG"
+
+
+@pytest.mark.parametrize(
+    ("dest", "expected"),
+    [
+        ("{dir}", "photo_colorized.png"),  # a folder gets the default name
+        ("noext", "noext.png"),  # missing extension comes from Format
+        ("relative/b.tif", "relative/b.tif"),  # relative to the last folder
+    ],
+)
+def test_save_path_resolution(app, image_path, dest, expected):
+    run_colorize(app, image_path, defaults(app))
+    base = app.last_save_dir  # saving moves last_save_dir to the new file's folder
+    path, status = save(app, image_path, dest.format(dir=base))
+    assert status.startswith("Saved")
+    assert path == str(base / expected)
+
+
+def test_save_as_uses_dialog_choice(app, image_path, tmp_path, monkeypatch):
+    run_colorize(app, image_path, defaults(app))
+    chosen = tmp_path / "picked.jpg"
+    chosen.write_bytes(b"old")  # dialog confirmed the overwrite
+    monkeypatch.setattr("colorizer.ui.file_dialog.ask_save_path", lambda initial: chosen)
+    path, status = app.save_as(image_path, "dummy", "png", 90, "", False, *defaults(app))
+    assert path == str(chosen) and status.startswith("Saved")
+    assert Image.open(chosen).format == "JPEG"
+
+
+def test_save_as_cancel_and_unavailable(app, image_path, monkeypatch):
+    from colorizer.ui import file_dialog
+
+    run_colorize(app, image_path, defaults(app))
+    monkeypatch.setattr(file_dialog, "ask_save_path", lambda initial: None)
+    assert app.save_as(image_path, "dummy", "png", 90, "", False, *defaults(app))[1] == (
+        "Save cancelled."
+    )
+
+    def unavailable(initial):
+        raise file_dialog.DialogUnavailable("no file dialog available")
+
+    monkeypatch.setattr(file_dialog, "ask_save_path", unavailable)
+    status = app.save_as(image_path, "dummy", "png", 90, "", False, *defaults(app))[1]
+    assert "Save to" in status

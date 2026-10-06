@@ -25,16 +25,18 @@ import numpy as np
 
 from colorizer.core.base import ColorizerModel
 from colorizer.core.params import Param
-from colorizer.core.pipeline import EXTENSIONS, render, save_image
+from colorizer.core.pipeline import EXTENSIONS, SUFFIX_FORMATS, render, save_image
 from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
 from colorizer.core.registry import Registry, default_registry
 from colorizer.core.runtime import ENV_DEVICE, available_devices, select_device
 from colorizer.core.session import LRU, LoadedImage, Session
 from colorizer.core.worker import Cancelled, Job, JobContext, Worker
+from colorizer.ui import file_dialog
 
 log = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.1
+SETTINGS_FILE = "ui.json"
 Rendered = tuple[np.ndarray, np.ndarray, Path]  # before, after (uint8 RGB), saved file
 
 
@@ -83,6 +85,12 @@ def widget_value(param: Param, value: Any) -> Any:
     return value
 
 
+def default_config_dir() -> Path:
+    """``$XDG_CONFIG_HOME/colorizer`` or ``~/.config/colorizer``."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / "colorizer"
+
+
 def to_uint8(rgb: np.ndarray) -> np.ndarray:
     return np.round(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
 
@@ -102,6 +110,7 @@ class App:
         session: Session | None = None,
         worker: Worker | None = None,
         output_dir: Path | None = None,
+        config_dir: Path | None = None,
     ) -> None:
         self.registry = registry or default_registry()
         self.session = session or Session(self.registry)
@@ -118,6 +127,31 @@ class App:
         self.slots = [Slot(mid, p) for mid, cls in self.models.items() for p in cls.params]
         self._before: LRU[str, np.ndarray] = LRU(4)
         self._current: Job[Rendered] | None = None
+        self.config_dir = config_dir or default_config_dir()
+        self.last_save_dir = self._load_last_save_dir()
+
+    # --- settings -------------------------------------------------------------------------
+
+    def _load_last_save_dir(self) -> Path:
+        try:
+            settings = json.loads((self.config_dir / SETTINGS_FILE).read_text(encoding="utf-8"))
+            saved = Path(settings["last_save_dir"])
+            if saved.is_dir():
+                return saved
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        pictures = Path.home() / "Pictures"
+        return pictures if pictures.is_dir() else Path.home()
+
+    def _remember_save_dir(self, directory: Path) -> None:
+        self.last_save_dir = directory
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            (self.config_dir / SETTINGS_FILE).write_text(
+                json.dumps({"last_save_dir": str(directory)}), encoding="utf-8"
+            )
+        except OSError as e:
+            log.warning("could not store settings: %s", e)
 
     # --- value plumbing -------------------------------------------------------------------
 
@@ -215,6 +249,107 @@ class App:
         finally:
             job.cancel()  # no-op when finished; stops the job if Gradio closed this generator
 
+    def suggest_save_path(self, image_path: str | None, fmt: str) -> Any:
+        """Default "Save to" path for a newly loaded image."""
+        if not image_path:
+            return gr.skip()
+        return str(self.last_save_dir / f"{Path(image_path).stem}_colorized{EXTENSIONS[fmt]}")
+
+    def retarget_extension(self, dest: str, fmt: str) -> Any:
+        """Keep the "Save to" extension in step with the Format dropdown."""
+        path = Path(dest.strip())
+        if dest.strip() and path.suffix.lower() in SUFFIX_FORMATS:
+            return str(path.with_suffix(EXTENSIONS[fmt]))
+        return gr.skip()
+
+    def resolve_save_path(self, dest: str, image_path: str, fmt: str) -> tuple[Path, str]:
+        """Turn the "Save to" text into (absolute path, format).
+
+        A directory gets the default file name; the extension decides the format, and a
+        missing or unknown extension gets the one for ``fmt``. Raises ``ValueError``.
+        """
+        text = dest.strip()
+        if not text:
+            raise ValueError("enter a file name to save to")
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = self.last_save_dir / path
+        if path.is_dir() or text.endswith(("/", os.sep)):
+            path = path / f"{Path(image_path).stem}_colorized{EXTENSIONS[fmt]}"
+        out_fmt = SUFFIX_FORMATS.get(path.suffix.lower())
+        if out_fmt is None:
+            path = path.with_name(path.name + EXTENSIONS[fmt])
+            out_fmt = SUFFIX_FORMATS[EXTENSIONS[fmt]]
+        return path, out_fmt
+
+    def save_to(
+        self,
+        image_path: str | None,
+        model_id: str,
+        fmt: str,
+        quality: float,
+        dest: str,
+        overwrite: bool,
+        *values: Any,
+    ) -> tuple[Any, str]:
+        """Write the current result to ``dest`` at full quality, from the cached ab."""
+        if not image_path:
+            return gr.skip(), "Upload and colorize an image first."
+        try:
+            params, post = self.split_values(model_id, values)
+            path, out_fmt = self.resolve_save_path(dest, image_path, fmt)
+        except ValueError as e:
+            return gr.skip(), f"Can't save: {e}."
+        if path.exists() and not overwrite:
+            return str(path), (
+                f"**{path.name}** already exists in {path.parent}. "
+                "Tick *Overwrite* or choose another name."
+            )
+        image = self.session.load(Path(image_path))
+        ab = self.session.cached_ab(image, model_id, params)
+        if ab is None:
+            return str(path), "Press **Colorize** first: the current model settings have no result."
+        src = image.src
+        try:
+            save_image(
+                render(src, ab, post),
+                path,
+                out_fmt,  # type: ignore[arg-type]
+                src.bit_depth,
+                src.exif,
+                int(quality),
+            )
+        except OSError as e:
+            return str(path), f"Can't save: {e}"
+        self._remember_save_dir(path.parent)
+        return str(path), f"Saved **{path}**"
+
+    def save_as(
+        self,
+        image_path: str | None,
+        model_id: str,
+        fmt: str,
+        quality: float,
+        dest: str,
+        overwrite: bool,
+        *values: Any,
+    ) -> tuple[Any, str]:
+        """Ask for a path with the desktop's save dialog, then save there."""
+        if not image_path:
+            return gr.skip(), "Upload and colorize an image first."
+        try:
+            initial, _ = self.resolve_save_path(dest, image_path, fmt)
+        except ValueError:
+            initial = Path(self.suggest_save_path(image_path, fmt))
+        try:
+            chosen = file_dialog.ask_save_path(initial)
+        except file_dialog.DialogUnavailable as e:
+            return gr.skip(), f"{e}. Type a path in *Save to* and press **Save**."
+        if chosen is None:
+            return gr.skip(), "Save cancelled."
+        # The dialog already asked about overwriting.
+        return self.save_to(image_path, model_id, fmt, quality, str(chosen), True, *values)
+
     def cancel(self) -> str:
         if self._current is not None:
             self._current.cancel()
@@ -297,6 +432,16 @@ class App:
                     )
                     with gr.Row():
                         download = gr.DownloadButton("Download result", value=None)
+                    with gr.Row(equal_height=True):
+                        save_path = gr.Textbox(
+                            label="Save to",
+                            info="Full path; the extension (.png, .jpg, .tif) sets the format.",
+                            scale=5,
+                        )
+                        with gr.Column(scale=1, min_width=140):
+                            overwrite = gr.Checkbox(label="Overwrite", value=False)
+                            save_btn = gr.Button("Save")
+                            save_as_btn = gr.Button("Save as…", visible=file_dialog.available())
                     status = gr.Markdown()
 
             values = [*model_widgets, *post_widgets]
@@ -321,6 +466,11 @@ class App:
                     outputs,
                     api_name="rerender" if i == 0 else False,
                 )
+            image.change(self.suggest_save_path, [image, fmt_dd], save_path, api_name=False)
+            fmt_dd.change(self.retarget_extension, [save_path, fmt_dd], save_path, api_name=False)
+            save_inputs = [image, model_dd, fmt_dd, quality, save_path, overwrite, *values]
+            save_btn.click(self.save_to, save_inputs, [save_path, status], api_name="save")
+            save_as_btn.click(self.save_as, save_inputs, [save_path, status], api_name=False)
             for w in (fmt_dd, quality):
                 event = w.release if isinstance(w, gr.Slider) else w.change
                 event(self.rerender, rerender_inputs, outputs, api_name=False)

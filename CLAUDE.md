@@ -127,6 +127,7 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 - Model dropdown. Changing it rebuilds the parameter panel (use `gr.render` or visibility-toggled groups).
 - A "Postprocess" accordion with the shared params. Postprocessing re-runs **without re-inference** (cache the last ab per image+model+params hash).
 - Output: before/after comparison slider (`gr.ImageSlider` if available, else side by side), download button.
+- Save to a chosen path: "Save to" textbox (extension sets the format; default `<last dir>/<stem>_colorized.<ext>`), "Save" (refuses to overwrite unless ticked) and "Save as…" (native dialog via kdialog/zenity/tkinter in a subprocess, `ui/file_dialog.py`). Last folder is stored in `~/.config/colorizer/ui.json`.
 - "Compare models" tab runs the same image through N selected models and shows a grid.
 - Presets: save/load JSON `{model, params, postprocess}` in `~/.config/colorizer/presets/`.
 - SIGGRAPH17 hints: click on the image to add a point, pick a color, and see the list of points with delete buttons.

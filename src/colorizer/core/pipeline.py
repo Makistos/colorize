@@ -23,6 +23,14 @@ log = logging.getLogger(__name__)
 OutputFormat = Literal["png", "jpg", "tiff"]
 FORMATS: dict[str, str] = {"png": "PNG", "jpg": "JPEG", "tiff": "TIFF"}
 EXTENSIONS: dict[str, str] = {"png": ".png", "jpg": ".jpg", "tiff": ".tiff"}
+# Output file suffix -> format.
+SUFFIX_FORMATS: dict[str, OutputFormat] = {
+    ".png": "png",
+    ".jpg": "jpg",
+    ".jpeg": "jpg",
+    ".tif": "tiff",
+    ".tiff": "tiff",
+}
 # Input file suffixes considered images when scanning directories.
 INPUT_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"})
 

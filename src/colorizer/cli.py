@@ -17,7 +17,7 @@ from typing import Any
 
 from colorizer.core import pipeline
 from colorizer.core.params import parse_params
-from colorizer.core.pipeline import EXTENSIONS, INPUT_SUFFIXES, OutputFormat
+from colorizer.core.pipeline import EXTENSIONS, INPUT_SUFFIXES, SUFFIX_FORMATS, OutputFormat
 from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
 from colorizer.core.registry import Registry, default_registry
 from colorizer.core.runtime import select_device
@@ -25,13 +25,6 @@ from colorizer.core.runtime import select_device
 log = logging.getLogger("colorizer")
 
 DEFAULT_MODEL = "ddcolor"
-_SUFFIX_FORMATS: dict[str, OutputFormat] = {
-    ".png": "png",
-    ".jpg": "jpg",
-    ".jpeg": "jpg",
-    ".tif": "tiff",
-    ".tiff": "tiff",
-}
 
 
 @dataclass
@@ -127,15 +120,15 @@ def plan_jobs(
         )
         jobs = []
         for f in files:
-            f_fmt = fmt or _SUFFIX_FORMATS.get(f.suffix.lower(), "png")
+            f_fmt = fmt or SUFFIX_FORMATS.get(f.suffix.lower(), "png")
             jobs.append((f, (dst / f.relative_to(src)).with_suffix(EXTENSIONS[f_fmt]), f_fmt))
         return jobs
     if not src.is_file():
         raise ValueError(f"input {src} does not exist")
     if dst.is_dir() or not dst.suffix:
-        f_fmt = fmt or _SUFFIX_FORMATS.get(src.suffix.lower(), "png")
+        f_fmt = fmt or SUFFIX_FORMATS.get(src.suffix.lower(), "png")
         return [(src, dst / (src.stem + EXTENSIONS[f_fmt]), f_fmt)]
-    out_fmt = fmt or _SUFFIX_FORMATS.get(dst.suffix.lower())
+    out_fmt = fmt or SUFFIX_FORMATS.get(dst.suffix.lower())
     if out_fmt is None:
         raise ValueError(f"cannot infer format from {dst.name}; use --format")
     return [(src, dst, out_fmt)]
