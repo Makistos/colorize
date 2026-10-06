@@ -17,6 +17,7 @@ ENTRY_POINT_GROUP = "colorizer.models"
 # id -> "module:Class". Imported lazily so optional extras don't slow down or break startup.
 BUILTIN_MODELS: dict[str, str] = {
     "zhang_eccv16": "colorizer.models.zhang:ZhangECCV16",
+    "deoldify": "colorizer.models.deoldify:DeOldify",
 }
 
 

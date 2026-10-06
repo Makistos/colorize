@@ -31,4 +31,5 @@ def test_golden(registry, model_id):
     rgb = render(src, ab)
     assert rgb.shape == (64, 96, 3)
     chroma = np.hypot(ab[..., 0], ab[..., 1])
-    assert chroma.mean() > 2.0, "model produced (near) grayscale output"
+    # A broken model gives ~0 everywhere; real ones colour at least some regions clearly.
+    assert np.percentile(chroma, 90) > 3.0, "model produced (near) grayscale output"

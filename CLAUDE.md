@@ -20,6 +20,7 @@ uv run colorizer in/ out/ --model ddcolor --param size=512   # batch CLI
 uv run pytest                 # tests
 COLORIZER_TEST_WEIGHTS=1 uv run pytest -m weights   # real-model tests
 uv run --group export python tools/export_onnx/zhang.py   # one-time ONNX export (CPU torch)
+uv run --group export python tools/export_onnx/deoldify.py   # DeOldify, rebuilt without fastai
 uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
 ```
 
@@ -202,7 +203,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestones 1-2 done (2026-10-06). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
+Status: milestones 1-2 done (2026-10-06); milestone 3: DeOldify done, DDColor export pending (fetching/running upstream code at export time needs the owner's approval). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.
