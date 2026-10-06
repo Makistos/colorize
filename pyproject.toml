@@ -11,10 +11,12 @@ dependencies = [
     "opencv-python-headless>=4.9",
     "scikit-image>=0.22",
     "onnxruntime>=1.18",
+    "gradio>=5.0",
 ]
 
 [project.scripts]
 colorizer = "colorizer.cli:main"
+colorizer-ui = "colorizer.ui.gradio_app:main"
 
 [project.entry-points."colorizer.models"]
 # Third-party packages register models here, e.g. `mymodel = "pkg.module:MyModel"`.
@@ -73,6 +75,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+    # Gradio internals on pandas 3; not ours.
+    "ignore:'future.no_silent_downcasting' is deprecated",
+    "ignore:The copy keyword is deprecated",
+]
 markers = [
     "weights: needs downloaded model weights (set COLORIZER_TEST_WEIGHTS=1)",
     "ui: Gradio UI tests",

@@ -36,6 +36,7 @@ src/colorizer/
     runtime.py     # device / ONNX execution provider selection
     weights.py     # download, cache (~/.cache/colorizer), checksum
     worker.py      # background job queue, cancellation, progress
+    session.py     # UI caches: decoded images + ab per image/model/params hash
   models/
     zhang.py       # ECCV16 + SIGGRAPH17 (with user hints)
     ddcolor.py
@@ -127,6 +128,8 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 - Presets: save/load JSON `{model, params, postprocess}` in `~/.config/colorizer/presets/`.
 - SIGGRAPH17 hints: click on the image to add a point, pick a color, and see the list of points with delete buttons.
 - Progress and cancel for long jobs (via worker.py).
+- Model param panels are visibility-toggled groups built at startup (fixed API endpoints `/colorize`, `/rerender`, `/cancel`).
+- Gradio telemetry and update checks are disabled (local-first).
 
 ## CLI (cli.py)
 
@@ -199,7 +202,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestone 1 done (2026-10-06). `worker.py` is deferred to milestone 2, where the UI needs it.
+Status: milestones 1-2 done (2026-10-06). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.
