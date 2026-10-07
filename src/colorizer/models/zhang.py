@@ -2,7 +2,7 @@
 
 Source: https://github.com/richzhang/colorization (BSD-2-Clause).
 The ONNX file is produced by ``tools/export_onnx/zhang.py`` from the official checkpoint
-below; until a hosted ONNX build exists, the export must be run once locally.
+below; a prebuilt copy is downloaded on first use if no local export exists.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from colorizer.core.base import ColorizerModel
 from colorizer.core.params import Param
 from colorizer.core.runtime import Device, create_session
 from colorizer.core.weights import WeightFile, cache_dir
+from colorizer.models._onnx import ensure_onnx
 
 ECCV16_CHECKPOINT = WeightFile(
     filename="colorization_release_v2-9b330a0b.pth",
@@ -64,9 +65,7 @@ class ZhangECCV16(ColorizerModel):
         self.device: Device | None = None
 
     def load(self, device: Device) -> None:
-        path = onnx_path(ECCV16_ONNX)
-        if not path.exists():
-            raise FileNotFoundError(f"{path} not found. Export it once with:\n    {EXPORT_HINT}")
+        path = ensure_onnx(ECCV16_ONNX, EXPORT_HINT)
         self._session, self.device = create_session(path, device)
 
     def unload(self) -> None:
@@ -115,9 +114,7 @@ class ZhangSIGGRAPH17(ColorizerModel):
         self.device: Device | None = None
 
     def load(self, device: Device) -> None:
-        path = onnx_path(SIGGRAPH17_ONNX)
-        if not path.exists():
-            raise FileNotFoundError(f"{path} not found. Export it once with:\n    {EXPORT_HINT}")
+        path = ensure_onnx(SIGGRAPH17_ONNX, EXPORT_HINT)
         self._session, self.device = create_session(path, device)
 
     def unload(self) -> None:

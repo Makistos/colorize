@@ -30,7 +30,33 @@ jobs:
           exe=dist/colorizer/colorizer
           [ -f "$exe.exe" ] && exe="$exe.exe"
           "$exe" --help
+      # tar keeps the executable bit on Linux; Windows users expect a zip.
+      - name: Archive
+        shell: bash
+        run: |
+          name=colorizer-${{ github.ref_name }}-${{ runner.os }}-${{ matrix.runtime }}
+          name=${name//\//-}
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then 7z a -tzip "../$name.zip" colorizer >/dev/null
+          else tar czf "../$name.tar.gz" colorizer; fi
       - uses: actions/upload-artifact@v4
         with:
           name: colorizer-${{ runner.os }}-${{ matrix.runtime }}
-          path: dist/colorizer
+          path: colorizer-*.*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" colorizer-* \
+            --repo "$GITHUB_REPOSITORY" --title "Colorizer $GITHUB_REF_NAME" --generate-notes

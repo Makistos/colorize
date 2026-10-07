@@ -13,7 +13,19 @@ from skimage.color import lab2rgb
 
 from colorizer.core.base import ColorizerModel
 from colorizer.core.runtime import CPU, Device, create_session
-from colorizer.core.weights import WeightFile, cache_dir
+from colorizer.core.weights import WeightFile, cache_dir, ensure
+
+# Prebuilt ONNX files, made by tools/export_onnx/* and published as GitHub release assets.
+ONNX_RELEASE_URL = "https://github.com/Makistos/colorize/releases/download/models-v1/"
+ONNX_SHA256: dict[str, str] = {
+    "ddcolor_artistic.onnx": "f426a9cbffa2be0e9d3d7d6925ac513271b6e187296258c73570e9727c8203ad",
+    "ddcolor_large.onnx": "73eb1bcf865617354b6b49747d83aff445a1500e1e41a1e9f0183e43ec11507d",
+    "ddcolor_tiny.onnx": "bc441aba000b9de6a36e0b71ea35924aed344d92e6865b22fa1e62efbe72d0ce",
+    "deoldify_artistic.onnx": "0172f8797adb035098957e86458c5dc0c587b8b295b66f77a3ab4f22dc35b8b3",
+    "deoldify_stable.onnx": "37fc9f524f5a6ad13bc4379e3a929829a13fe1015203dcb10f9bfb9a38377cd1",
+    "zhang_eccv16.onnx": "ec93605a9e8d792a2853a78524a05d28b66a6876a6eef5600757e589ded01456",
+    "zhang_siggraph17.onnx": "5c959374532e87011e3fcd92964be0d6fdb4e29c2c9cdbfe93688e9b9bf5321a",
+}
 
 
 @dataclass(frozen=True)
@@ -24,6 +36,17 @@ class OnnxVariant:
 
 def onnx_path(filename: str) -> Path:
     return cache_dir() / filename
+
+
+def ensure_onnx(filename: str, export_hint: str) -> Path:
+    """Local path of an ONNX file: a local export in the cache dir, else the hosted build."""
+    path = onnx_path(filename)
+    if path.exists():
+        return path
+    sha256 = ONNX_SHA256.get(filename)
+    if sha256 is None:
+        raise FileNotFoundError(f"{path} not found. Export it once with:\n    {export_hint}")
+    return ensure(WeightFile(filename, ONNX_RELEASE_URL + filename, sha256))
 
 
 def resize_L(L: np.ndarray, size: int) -> np.ndarray:
@@ -62,10 +85,6 @@ class OnnxVariantModel(ColorizerModel):
 
     def session(self, variant: str) -> Any:
         if variant not in self._sessions:
-            path = onnx_path(self.variants[variant].onnx)
-            if not path.exists():
-                raise FileNotFoundError(
-                    f"{path} not found. Export it once with:\n    {self.export_hint}"
-                )
+            path = ensure_onnx(self.variants[variant].onnx, self.export_hint)
             self._sessions[variant], _ = create_session(path, self.device)
         return self._sessions[variant]

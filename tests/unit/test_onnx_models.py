@@ -78,10 +78,35 @@ def test_param_validation(cls, bad):
 @pytest.mark.parametrize("cls", [DDColor, DeOldify])
 def test_missing_onnx_explains_export(cls, tmp_path, monkeypatch, L):
     monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
+    monkeypatch.setattr(_onnx, "ONNX_SHA256", {})  # no hosted build
     model = cls()
     model.load(CPU)
     with pytest.raises(FileNotFoundError, match="tools/export_onnx"):
         model.predict_ab(L, **model.validate_params({}))
+
+
+def test_missing_onnx_downloads_hosted_build(tmp_path, monkeypatch):
+    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
+    fetched = []
+    monkeypatch.setattr(_onnx, "ensure", lambda w: fetched.append(w) or tmp_path / w.filename)
+    assert _onnx.ensure_onnx("ddcolor_tiny.onnx", "hint") == tmp_path / "ddcolor_tiny.onnx"
+    (w,) = fetched
+    assert w.url == _onnx.ONNX_RELEASE_URL + "ddcolor_tiny.onnx"
+    assert w.sha256 == _onnx.ONNX_SHA256["ddcolor_tiny.onnx"]
+
+
+def test_local_export_skips_download(tmp_path, monkeypatch):
+    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
+    monkeypatch.setattr(_onnx, "ensure", lambda w: pytest.fail("downloaded"))
+    (tmp_path / "ddcolor_tiny.onnx").touch()
+    assert _onnx.ensure_onnx("ddcolor_tiny.onnx", "hint") == tmp_path / "ddcolor_tiny.onnx"
+
+
+def test_every_onnx_variant_is_hosted():
+    from colorizer.models import zhang
+
+    names = {v.onnx for cls in (DDColor, DeOldify) for v in cls.variants.values()}
+    assert names | {zhang.ECCV16_ONNX, zhang.SIGGRAPH17_ONNX} == set(_onnx.ONNX_SHA256)
 
 
 def test_sessions_created_per_variant_on_demand(tmp_path, monkeypatch, L):

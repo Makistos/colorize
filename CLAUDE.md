@@ -112,7 +112,7 @@ Verify weight sources, checkpoints, and licenses before hardcoding them, and rec
 | `deoldify` | jantic/DeOldify (MIT) | `variant` choice [artistic, stable]; `render_factor` int 7–45, default 35 (working size = render_factor × 16) |
 | `sd_controlnet` | SD 1.5 + ControlNet recolor/lineart (optional extra) | `prompt`, `negative_prompt`, `steps` 10–50, `cfg` 1–15, `strength` 0–1, `seed` |
 
-ONNX files are not hosted yet: `tools/export_onnx/<model>.py` downloads the SHA256-pinned upstream checkpoint and writes the ONNX into the cache dir (`$COLORIZER_CACHE_DIR`, default `~/.cache/colorizer`). Once ONNX builds are published (e.g. as GitHub release assets), record their URL + SHA256 and download them via `core/weights.py` instead.
+ONNX builds are hosted as assets of the `models-v1` GitHub release (URL + SHA256 in `models/_onnx.py`, `ONNX_SHA256`) and downloaded on first use via `core/weights.py`; a local export in the cache dir (`$COLORIZER_CACHE_DIR`, default `~/.cache/colorizer`) takes precedence. `tools/export_onnx/<model>.py` downloads the SHA256-pinned upstream checkpoint and writes the ONNX into the cache dir. Re-exported ONNX files need a new `models-vN` release and updated hashes; upload the upstream license texts in `packaging/licenses/` with them.
 
 Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH17 hints → SD.
 
@@ -196,7 +196,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 - `ci.yml` (push + PR): lint/type job on Linux, plus a test matrix of {ubuntu, windows, macos} × Python {3.11, 3.13} running default + `ui` markers. Use `astral-sh/setup-uv` with caching enabled.
 - `weights.yml` (nightly cron + `workflow_dispatch`): Linux CPU, `COLORIZER_TEST_WEIGHTS=1`. Cache `~/.cache/colorizer` with `actions/cache` keyed on the hash of the SHA256 list in `models/`. Run all models except diffusion.
 - GPU and diffusion tests are not run on GitHub-hosted runners (no free GPUs). Run them locally before a release, or on a self-hosted runner.
-- `release.yml` (tag): PyInstaller builds (milestone 5).
+- `build.yml` (tag `v*` + `workflow_dispatch`): PyInstaller builds (Linux CPU, Windows DirectML); on a tag, archives are published as a GitHub Release.
 
 ## Conventions
 
@@ -208,7 +208,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestones 1-4 done (2026-10-06). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
+Status: milestones 1-5 done (2026-10-07). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.
