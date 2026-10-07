@@ -21,6 +21,7 @@ BUILTIN_MODELS: dict[str, str] = {
     "zhang_eccv16": "colorizer.models.zhang:ZhangECCV16",
     "zhang_siggraph17": "colorizer.models.zhang:ZhangSIGGRAPH17",
     "deoldify": "colorizer.models.deoldify:DeOldify",
+    "sd_controlnet": "colorizer.models.sd_controlnet:SDControlNet",
 }
 
 

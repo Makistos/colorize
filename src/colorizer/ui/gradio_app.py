@@ -132,6 +132,7 @@ class App:
         worker: Worker | None = None,
         output_dir: Path | None = None,
         config_dir: Path | None = None,
+        dialogs: Any = None,
     ) -> None:
         self.registry = registry or default_registry()
         self.session = session or Session(self.registry)
@@ -140,14 +141,22 @@ class App:
         self.models: dict[str, type[ColorizerModel]] = {}
         for model_id in self.registry.ids():
             try:
-                self.models[model_id] = self.registry.get_class(model_id)
-            except Exception as e:  # e.g. an optional extra is not installed
+                cls = self.registry.get_class(model_id)
+            except Exception as e:  # broken plugin
                 log.warning("model %s unavailable: %s", model_id, e)
+                continue
+            if cls.available():
+                self.models[model_id] = cls
+            else:
+                log.info("model %s hidden: its optional dependencies are not installed", model_id)
         if not self.models:
             raise RuntimeError("no models available")
         self.slots = [Slot(mid, p) for mid, cls in self.models.items() for p in cls.params]
         self._before: LRU[str, np.ndarray] = LRU(4)
         self._current: Job[Any] | None = None
+        # Anything with available() / ask_save_path() / ask_directory() like file_dialog;
+        # the desktop app passes the webview's native dialogs.
+        self.dialogs = dialogs or file_dialog
         self.config_dir = config_dir or presets.config_dir()
         self.presets_dir = self.config_dir / "presets"
         self.last_save_dir = self._load_last_save_dir()
@@ -417,7 +426,7 @@ class App:
         while not start.is_dir() and start != start.parent:
             start = start.parent
         try:
-            chosen = file_dialog.ask_directory(start)
+            chosen = self.dialogs.ask_directory(start)
         except file_dialog.DialogUnavailable as e:
             return gr.skip(), f"{e}. Type the folder path instead."
         return (str(chosen), "") if chosen else (gr.skip(), "")
@@ -560,7 +569,7 @@ class App:
         except ValueError:
             initial = Path(self.suggest_save_path(image_path, fmt))
         try:
-            chosen = file_dialog.ask_save_path(initial)
+            chosen = self.dialogs.ask_save_path(initial)
         except file_dialog.DialogUnavailable as e:
             return gr.skip(), f"{e}. Type a path in *Save to* and press **Save**."
         if chosen is None:
@@ -631,7 +640,7 @@ class App:
         first = next(iter(self.models))
         devices = ["auto"] + [d.name for d in available_devices()]
         env_device = os.environ.get(ENV_DEVICE, "auto").lower()
-        dialogs = file_dialog.available()
+        dialogs = self.dialogs.available()
 
         with gr.Blocks(title="Colorizer", analytics_enabled=False) as demo:
             with gr.Row():

@@ -1,0 +1,36 @@
+name: Desktop build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runtime: cpu
+          - os: windows-latest
+            runtime: directml
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra ${{ matrix.runtime }} --extra desktop --group build
+      - run: uv run pyinstaller --noconfirm packaging/colorizer.spec
+      # Imports the whole UI stack from the bundle (argparse exits before any window).
+      - name: Smoke test
+        shell: bash
+        run: |
+          exe=dist/colorizer/colorizer
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: colorizer-${{ runner.os }}-${{ matrix.runtime }}
+          path: dist/colorizer

@@ -108,7 +108,15 @@ class Session:
         model = self.registry.get(model_id, device)
         if ctx:
             ctx.progress(0.3, f"Running {model_id}")
-        ab = infer_ab(image.src, model, params)
+
+            def on_step(fraction: float) -> None:
+                ctx.progress(0.3 + 0.6 * fraction, f"Running {model_id}")
+
+            model.step_callback = on_step
+        try:
+            ab = infer_ab(image.src, model, params)
+        finally:
+            model.step_callback = None
         self.inference_count += 1
         self._ab.put(key, ab)
         return ab

@@ -57,9 +57,14 @@ def registry() -> Registry:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    if os.environ.get("COLORIZER_TEST_WEIGHTS") == "1":
-        return
-    skip = pytest.mark.skip(reason="set COLORIZER_TEST_WEIGHTS=1 to run")
-    for item in items:
-        if "weights" in item.keywords:
-            item.add_marker(skip)
+    gates = {
+        "weights": ("COLORIZER_TEST_WEIGHTS", "downloads/uses model weights"),
+        "diffusion": ("COLORIZER_TEST_DIFFUSION", "Stable Diffusion: ~3.6 GB download, slow"),
+    }
+    for marker, (env, why) in gates.items():
+        if os.environ.get(env) == "1":
+            continue
+        skip = pytest.mark.skip(reason=f"{why}; set {env}=1 to run")
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, ClassVar
 
 import numpy as np
@@ -17,6 +17,15 @@ class ColorizerModel(ABC):
     display_name: ClassVar[str]
     params: ClassVar[tuple[Param, ...]]
     license: ClassVar[str]
+
+    # Set by the caller around predict_ab; slow models may call it with progress in [0, 1].
+    # It raises ``Cancelled`` when the job was cancelled, which should propagate.
+    step_callback: Callable[[float], None] | None = None
+
+    @classmethod
+    def available(cls) -> bool:
+        """False if optional dependencies are missing (the UI then hides the model)."""
+        return True
 
     @abstractmethod
     def load(self, device: Device) -> None: ...

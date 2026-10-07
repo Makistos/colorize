@@ -96,7 +96,8 @@ def _commands(initial: Path, directory: bool = False) -> list[list[str]]:
         ):
             if shutil.which(name):
                 cmds.append(cmd)
-    if _has_tk():
+    # A frozen app has no interpreter to run the tkinter helper with.
+    if _has_tk() and not getattr(sys, "frozen", False):
         mode = "dir" if directory else "save"
         title = DIR_TITLE if directory else TITLE
         cmds.append([sys.executable, "-c", _TK_SCRIPT, str(initial), title, _PATTERNS, mode])

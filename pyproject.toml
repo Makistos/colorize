@@ -28,9 +28,33 @@ webgpu = [
     "onnxruntime-webgpu>=1.27; (sys_platform == 'linux' and platform_machine == 'x86_64') or sys_platform == 'win32' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
 ]
 
+# Native desktop window around the UI (colorizer-app). Qt on Linux; system webviews on
+# Windows (Edge WebView2) and macOS (WebKit).
+desktop = [
+    "pywebview[qt]>=5; sys_platform == 'linux'",
+    "pywebview>=5; sys_platform != 'linux'",
+]
+
+# Optional Stable Diffusion + ControlNet model (sd_controlnet). PyTorch from PyPI: CUDA on
+# Linux/Windows, MPS on macOS, CPU otherwise. AMD GPUs on Linux: use diffusion-rocm.
+diffusion = [
+    "torch>=2.4",
+    "diffusers>=0.30",
+    "transformers>=4.44",
+    "accelerate>=0.33",
+]
+diffusion-rocm = [
+    "torch>=2.4; sys_platform == 'linux'",
+    "pytorch-triton-rocm; sys_platform == 'linux'",
+    "diffusers>=0.30",
+    "transformers>=4.44",
+    "accelerate>=0.33",
+]
+
 [project.scripts]
 colorizer = "colorizer.cli:main"
 colorizer-ui = "colorizer.ui.gradio_app:main"
+colorizer-app = "colorizer.ui.desktop:main"
 
 [project.entry-points."colorizer.models"]
 # Third-party packages register models here, e.g. `mymodel = "pkg.module:MyModel"`.
@@ -43,6 +67,8 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
+# Desktop app packaging (packaging/colorizer.spec).
+build = ["pyinstaller>=6.10"]
 # Only needed to run tools/export_onnx/*. Never imported at runtime.
 export = [
     "torch>=2.3",
@@ -55,6 +81,8 @@ export = [
 default-groups = ["dev"]
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }, { extra = "directml" }, { extra = "webgpu" }],
+    # Each wants a different PyTorch build.
+    [{ extra = "diffusion" }, { extra = "diffusion-rocm" }, { group = "export" }],
 ]
 
 [[tool.uv.index]]
@@ -62,9 +90,19 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+# ROCm 6.4 still ships RDNA2 (gfx1030, e.g. RX 6800/6900) kernels.
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
-torchvision = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+torch = [
+    { index = "pytorch-cpu", group = "export", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-rocm", extra = "diffusion-rocm" },
+]
+torchvision = [{ index = "pytorch-cpu", group = "export", marker = "sys_platform != 'darwin'" }]
+pytorch-triton-rocm = [{ index = "pytorch-rocm", extra = "diffusion-rocm" }]
 
 [build-system]
 requires = ["hatchling"]
