@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Any, Literal
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
-from skimage.color import lab2rgb, rgb2lab
+from skimage.color import rgb2lab
 
 from colorizer.core import postprocess
 from colorizer.core.base import ColorizerModel
@@ -114,12 +113,65 @@ def render(src: SourceImage, ab: np.ndarray, post: Postprocess | None = None) ->
     if ab.shape[:2] != (h, w):
         ab = cv2.resize(ab, (w, h), interpolation=cv2.INTER_CUBIC)
     ab = postprocess.apply(ab, post or Postprocess())
-    lab = np.dstack([src.L.astype(np.float64), ab.astype(np.float64)])
-    with warnings.catch_warnings():
-        # Out-of-gamut colours are clipped; skimage warns about each one.
-        warnings.simplefilter("ignore", UserWarning)
-        rgb = np.asarray(lab2rgb(lab), dtype=np.float64)
-    return np.clip(rgb, 0.0, 1.0)
+    return lab_to_rgb(src.L, ab)
+
+
+# CIE Lab (D65, 2°) -> linear sRGB, with the same constants as skimage's rgb2lab.
+_WHITE_X, _WHITE_Z = 0.95047, 1.08883
+_RGB_FROM_XYZ = (
+    (3.24048134, -1.53715152, -0.49853633),
+    (-0.96925495, 1.87599, 0.04155593),
+    (0.05564664, -0.20404134, 1.05731107),
+)
+_GAMUT_EPS = 1e-6
+_GAMUT_STEPS = 12  # binary-search steps on the chroma scale (precision 2**-12)
+
+
+def _finv(t: np.ndarray) -> np.ndarray:
+    out: np.ndarray = np.where(t > 6 / 29, t * t * t, (3 * (6 / 29) ** 2) * (t - 4 / 29))
+    return out
+
+
+def _lab_to_linear(fy: np.ndarray, Y: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Per-pixel ``fy = (L+16)/116``, ``Y = finv(fy)``, a, b (all (N,)) -> linear sRGB (3, N)."""
+    X = _WHITE_X * _finv(fy + a / 500.0)
+    Z = _WHITE_Z * _finv(fy - b / 200.0)
+    return np.stack([r0 * X + r1 * Y + r2 * Z for r0, r1, r2 in _RGB_FROM_XYZ])
+
+
+def _in_gamut(lin: np.ndarray) -> np.ndarray:
+    ok: np.ndarray = ((lin >= -_GAMUT_EPS) & (lin <= 1.0 + _GAMUT_EPS)).all(axis=0)
+    return ok
+
+
+def lab_to_rgb(L: np.ndarray, ab: np.ndarray) -> np.ndarray:
+    """Lab -> sRGB float64 HxWx3 in [0, 1] that keeps L exact.
+
+    Out-of-gamut pixels lose chroma at constant hue (binary search on an ab scale factor)
+    instead of having RGB clipped per channel, which would change their lightness.
+    """
+    h, w = L.shape
+    fy = (L.reshape(-1).astype(np.float64) + 16.0) / 116.0
+    Y = _finv(fy)
+    a = ab[..., 0].reshape(-1).astype(np.float64)
+    b = ab[..., 1].reshape(-1).astype(np.float64)
+    lin = _lab_to_linear(fy, Y, a, b)
+    out = np.flatnonzero(~_in_gamut(lin))
+    if out.size:
+        fy_o, Y_o, a_o, b_o = fy[out], Y[out], a[out], b[out]
+        # float32 is plenty for the search (error ~1e-7 < _GAMUT_EPS) and twice as fast.
+        f32 = [x.astype(np.float32) for x in (fy_o, Y_o, a_o, b_o)]
+        lo, hi = np.zeros(out.size, np.float32), np.ones(out.size, np.float32)
+        for _ in range(_GAMUT_STEPS):
+            mid = (lo + hi) * np.float32(0.5)
+            ok = _in_gamut(_lab_to_linear(f32[0], f32[1], f32[2] * mid, f32[3] * mid))
+            lo, hi = np.where(ok, mid, lo), np.where(ok, hi, mid)
+        k = lo.astype(np.float64)
+        lin[:, out] = _lab_to_linear(fy_o, Y_o, a_o * k, b_o * k)
+    lin = np.clip(lin, 0.0, 1.0)
+    rgb = np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055)
+    out_rgb: np.ndarray = np.clip(rgb.T, 0.0, 1.0).reshape(h, w, 3)
+    return out_rgb
 
 
 def save_image(

@@ -111,3 +111,52 @@ def test_render_postprocess_does_not_need_model():
 
     gray = render(src, ab, Postprocess(chroma_blend=0.0))
     assert np.allclose(gray[..., 0], gray[..., 2], atol=1e-4)
+
+
+@pytest.mark.parametrize("ab_value", [(0.0, 0.0), (10.0, -20.0), (40.0, 60.0), (-128.0, 127.0)])
+def test_output_L_is_the_full_resolution_input_L(ab_value):
+    """The colorized image keeps the source's L, also where colours are out of gamut."""
+    from skimage.color import rgb2lab
+
+    rng = np.random.default_rng(0)
+    src = SourceImage.from_rgb(rng.uniform(0, 1, (203, 301)))  # odd, non-square
+    ab = np.empty((16, 24, 2), np.float32)  # model working size, much smaller
+    ab[...] = ab_value
+    out = render(src, ab)
+    assert out.shape == (203, 301, 3)
+    assert np.abs(rgb2lab(out)[..., 0] - src.L).max() < 1e-2
+
+
+def test_lab_to_rgb_matches_skimage_in_gamut():
+    from skimage.color import rgb2lab
+
+    rgb = np.random.default_rng(1).uniform(0, 1, (40, 30, 3))
+    lab = rgb2lab(rgb)
+    assert np.abs(pipeline.lab_to_rgb(lab[..., 0], lab[..., 1:]) - rgb).max() < 1e-5
+
+
+def test_out_of_gamut_keeps_hue():
+    L = np.full((1, 1), 50.0)
+    ab = np.array([[[90.0, 60.0]]])
+    from skimage.color import rgb2lab
+
+    lab = rgb2lab(pipeline.lab_to_rgb(L, ab))[0, 0]
+    assert abs(lab[0] - 50.0) < 1e-2
+    assert np.hypot(lab[1], lab[2]) < np.hypot(90, 60)  # chroma reduced...
+    assert abs(np.arctan2(lab[2], lab[1]) - np.arctan2(60, 90)) < 1e-2  # ...at the same hue
+
+
+def test_ab_is_upscaled_bicubically():
+    import cv2
+
+    src = SourceImage.from_rgb(np.full((30, 50), 0.5))
+    ab = np.random.default_rng(2).normal(0, 10, (6, 10, 2)).astype(np.float32)
+    expected = pipeline.lab_to_rgb(src.L, cv2.resize(ab, (50, 30), interpolation=cv2.INTER_CUBIC))
+    assert np.allclose(render(src, ab), expected)
+
+
+def test_ab_smooth_defaults_to_off():
+    from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
+
+    assert Postprocess().ab_smooth == 0.0
+    assert {p.name: p.default for p in POSTPROCESS_PARAMS}["ab_smooth"] == 0.0
