@@ -106,3 +106,40 @@ def test_nafnet_pads_to_multiple_of_16_and_tiles(monkeypatch, tmp_path):
     assert set(sessions) == {"nafnet_deblur.onnx", "nafnet_denoise.onnx"}
     with pytest.raises(ValueError):
         run_restorer(model, gray, {"variant": "sharpen"})
+
+
+def test_paste_face_blends_only_inside_the_face():
+    import cv2
+
+    from colorizer.models.codeformer import FACE_SIZE, paste_face
+
+    canvas = np.zeros((300, 400))
+    face = np.ones((FACE_SIZE, FACE_SIZE), np.float32)
+    # Face aligned from a 128 px square at (100, 50): scale 4 into the 512 template.
+    affine = np.array([[4.0, 0, -400], [0, 4.0, -200]], np.float32)
+    out = paste_face(canvas, face, cv2.invertAffineTransform(affine), 1)
+    assert out[50 + 64, 100 + 64] == pytest.approx(1.0)  # centre: restored face
+    assert out[10, 10] == 0.0 and out[250, 350] == 0.0  # outside: untouched
+    edge = out[50 + 64, 100 : 100 + 64]  # from the face's left border to its centre
+    assert edge[0] == 0.0 and edge[-1] == pytest.approx(1.0)
+    assert ((edge > 0.05) & (edge < 0.95)).sum() >= 3  # feathered, not a hard step
+    up = paste_face(np.zeros((600, 800)), face, cv2.invertAffineTransform(affine), 2)
+    assert up[2 * 114, 2 * 164] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("stub_id", ["swinir", "seedvr2"])
+def test_stubs_registered_but_disabled(stub_id):
+    from colorizer.core.registry import Registry
+    from colorizer.core.restore import validate_restore_params
+
+    cls = Registry().restorers.get_class(stub_id)
+    assert cls.enabled is False and cls.license.startswith("Apache-2.0")
+    with pytest.raises(ValueError, match="not implemented"):
+        validate_restore_params(cls, {})
+
+
+def test_codeformer_declares_noncommercial_warning():
+    from colorizer.models.codeformer import CodeFormer
+
+    assert "non-commercial" in CodeFormer.warning
+    assert {p.name: p.default for p in CodeFormer.params} == {"fidelity": 0.7, "upscale_bg": False}

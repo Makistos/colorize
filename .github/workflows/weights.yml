@@ -36,6 +36,9 @@ jobs:
           if [ ! -f ~/.cache/colorizer/nafnet_denoise.onnx ]; then
             uv run --locked --extra cpu --group export python tools/export_onnx/nafnet.py
           fi
+          if [ ! -f ~/.cache/colorizer/codeformer.onnx ]; then
+            uv run --locked --extra cpu --group export python tools/export_onnx/codeformer.py
+          fi
           # The exported ONNX files are what the tests need; drop the checkpoints so the
           # cache stays well under the 10 GB per-repo limit.
           rm -f ~/.cache/colorizer/*.pth ~/.cache/colorizer/*.bin

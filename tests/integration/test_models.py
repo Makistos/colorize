@@ -52,6 +52,8 @@ RESTORERS = {
     "realesrgan": ({"scale": 2, "tile": 32}, 2),
     "nafnet": ({"variant": "deblur"}, 1),
     "nafnet-denoise": ({"variant": "denoise"}, 1),
+    "codeformer": ({"fidelity": 0.7}, 1),
+    "codeformer-bg": ({"upscale_bg": True}, 2),
 }
 
 
@@ -71,3 +73,21 @@ def test_golden_restorer(registry, restorer_id):
     # Restored, not replaced: still closely resembles the input.
     up = cv2.resize(gray, out.shape[::-1], interpolation=cv2.INTER_CUBIC)
     assert np.corrcoef(up.ravel(), out.ravel())[0, 1] > 0.9
+
+
+def test_codeformer_restores_a_face(registry):
+    """Detects the face in a real portrait, sharpens it, and leaves the rest alone."""
+    import cv2
+    from skimage import data
+
+    restorer = registry.restorers.get("codeformer", CPU)
+    gray = cv2.cvtColor(data.astronaut(), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255
+    small = cv2.resize(gray, (128, 128), interpolation=cv2.INTER_AREA)
+    blurred = np.clip(cv2.resize(small, (512, 512), interpolation=cv2.INTER_CUBIC), 0, 1)
+    out = restorer.restore(blurred, fidelity=0.7, upscale_bg=False)
+
+    def sharpness(img):
+        return cv2.Laplacian(img[30:230, 150:330].astype(np.float64), cv2.CV_64F).var()
+
+    assert sharpness(out) > 1.5 * sharpness(blurred)
+    assert np.allclose(out[400:], blurred[400:], atol=1e-6)

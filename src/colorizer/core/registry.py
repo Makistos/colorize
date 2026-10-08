@@ -30,6 +30,10 @@ BUILTIN_MODELS: dict[str, str] = {
 BUILTIN_RESTORERS: dict[str, str] = {
     "realesrgan": "colorizer.models.realesrgan:RealESRGAN",
     "nafnet": "colorizer.models.nafnet:NAFNet",
+    "codeformer": "colorizer.models.codeformer:CodeFormer",
+    # Registered but disabled (enabled = False) until implemented.
+    "swinir": "colorizer.models.stubs:SwinIR",
+    "seedvr2": "colorizer.models.stubs:SeedVR2",
 }
 
 P = TypeVar("P", bound=Plugin)
