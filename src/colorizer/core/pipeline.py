@@ -15,6 +15,7 @@ from skimage.color import rgb2lab
 
 from colorizer.core import postprocess
 from colorizer.core.base import ColorizerModel
+from colorizer.core.params import Param
 from colorizer.core.postprocess import Postprocess
 from colorizer.core.restore import Restorer, run_restorer, validate_restore_params
 
@@ -122,6 +123,26 @@ def restore_image(
     for restorer, params in steps:
         gray = run_restorer(restorer, gray, params)
     return SourceImage(L=gray_to_L(gray), bit_depth=src.bit_depth, exif=src.exif)
+
+
+def scale_points(
+    schema: Sequence[Param], params: Mapping[str, Any], src: tuple[int, int], dst: tuple[int, int]
+) -> dict[str, Any]:
+    """Rescale every ``points`` param (pixel coords on a (h, w) ``src`` image) to ``dst``.
+
+    Hints are placed on the original photo; restorers may change its resolution.
+    """
+    out = dict(params)
+    if src == dst:
+        return out
+    (sh, sw), (dh, dw) = src, dst
+    for p in schema:
+        if p.kind == "points" and out.get(p.name):
+            out[p.name] = [
+                (min(round(x * dw / sw), dw - 1), min(round(y * dh / sh), dh - 1), rgb)
+                for x, y, rgb in out[p.name]
+            ]
+    return out
 
 
 def infer_ab(src: SourceImage, model: ColorizerModel, params: Mapping[str, Any]) -> np.ndarray:
@@ -245,7 +266,9 @@ def colorize_file(
     quality: int = 95,
     restore: Sequence[tuple[Restorer, Mapping[str, Any]]] = (),
 ) -> None:
-    src = restore_image(load_image(src_path), restore)
+    original = load_image(src_path)
+    src = restore_image(original, restore)
+    params = scale_points(model.params, model.validate_params(params), original.size, src.size)
     ab = infer_ab(src, model, params)
     rgb = render(src, ab, post)
     save_image(rgb, dst_path, fmt=fmt, bit_depth=src.bit_depth, exif=src.exif, quality=quality)

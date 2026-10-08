@@ -204,3 +204,13 @@ def test_restored_L_is_the_output_L():
 def test_gray_L_conversions_are_inverse():
     L = np.linspace(0, 100, 10001, dtype=np.float32)
     assert np.abs(pipeline.gray_to_L(pipeline.L_to_gray(L)) - L).max() < 1e-3
+
+
+def test_points_rescaled_when_restore_changes_size():
+    from colorizer.core.params import Param
+
+    schema = (Param("hints", "points", []), Param("size", "int", 1))
+    params = {"hints": [(10, 20, (1, 2, 3)), (49, 39, (0, 0, 0))], "size": 1}
+    out = pipeline.scale_points(schema, params, (40, 50), (80, 100))
+    assert out["hints"] == [(20, 40, (1, 2, 3)), (98, 78, (0, 0, 0))] and out["size"] == 1
+    assert pipeline.scale_points(schema, params, (40, 50), (40, 50)) == params

@@ -9,7 +9,7 @@ from PIL import Image
 from colorizer.core.params import Param
 from colorizer.core.postprocess import POSTPROCESS_PARAMS
 from colorizer.core.registry import Registry
-from colorizer.ui.gradio_app import App, widget_for, widget_value
+from colorizer.ui.gradio_app import VIEWS, App, widget_for, widget_value
 from tests.conftest import DummyModel
 
 pytestmark = pytest.mark.ui
@@ -31,12 +31,18 @@ def image_path(tmp_path):
     return str(p)
 
 
-def defaults(app):
-    return [s.param.default for s in app.slots] + [p.default for p in POSTPROCESS_PARAMS]
+def defaults(app, restore=()):
+    """Flat widget values: model slots, restore chain + its slots, postprocess."""
+    return [
+        *(s.param.default for s in app.slots),
+        list(restore),
+        *(s.param.default for s in app.rslots),
+        *(p.default for p in POSTPROCESS_PARAMS),
+    ]
 
 
-def run_colorize(app, image_path, values, model="dummy"):
-    *_, last = app.colorize(image_path, model, "cpu", "png", 95, *values)
+def run_colorize(app, image_path, values, model="dummy", view=VIEWS[0]):
+    *_, last = app.colorize(image_path, model, "cpu", "png", 95, view, *values)
     return last
 
 
@@ -83,7 +89,7 @@ def test_colorize_then_postprocess_without_reinference(app, image_path):
     assert app.session.inference_count == 1
 
     gray_values = [*values[: -len(POSTPROCESS_PARAMS)], 0.0, 0.0, 0.0, 1.0, 0.0]  # saturation 0
-    (_, after2), _, status2 = app.rerender(image_path, "dummy", "png", 95, *gray_values)
+    (_, after2), _, status2 = app.rerender(image_path, "dummy", "png", 95, VIEWS[0], *gray_values)
     assert np.ptp(after2.astype(int), axis=2).max() <= 1
     assert status2.startswith("Updated")
     assert app.session.inference_count == 1
@@ -98,14 +104,14 @@ def test_rerender_with_changed_model_params_does_not_infer(app, image_path):
     run_colorize(app, image_path, values)
     changed = list(values)
     changed[0] = 64  # dummy "size"
-    _, _, status = app.rerender(image_path, "dummy", "png", 95, *changed)
+    _, _, status = app.rerender(image_path, "dummy", "png", 95, VIEWS[0], *changed)
     assert "Colorize" in status
     assert app.session.inference_count == 1
 
 
 def test_rerender_format_change_writes_new_file(app, image_path):
     run_colorize(app, image_path, defaults(app))
-    _, out, _ = app.rerender(image_path, "dummy", "jpg", 80, *defaults(app))
+    _, out, _ = app.rerender(image_path, "dummy", "jpg", 80, VIEWS[0], *defaults(app))
     assert out.endswith(".jpg") and Image.open(out).format == "JPEG"
 
 
@@ -138,7 +144,7 @@ def test_cancel_stops_job(app, image_path, monkeypatch):
         original(self, device)
 
     monkeypatch.setattr(DummyModel, "load", slow_load)
-    gen = app.colorize(image_path, "dummy", "cpu", "png", 95, *defaults(app))
+    gen = app.colorize(image_path, "dummy", "cpu", "png", 95, VIEWS[0], *defaults(app))
     next(gen)  # first progress update
     started.wait(5)
     app.cancel()
@@ -160,10 +166,12 @@ def test_end_to_end_via_gradio_client(app, image_path):
         client = Client(url, verbose=False)
         img = handle_file(image_path)
         result = client.predict(
-            img, "dummy", "cpu", "png", 95, *defaults(app), api_name="/colorize"
+            img, "dummy", "cpu", "png", 95, VIEWS[0], *defaults(app), api_name="/colorize"
         )
         assert len(result) == 3 and result[2].startswith("Done")
-        result = client.predict(img, "dummy", "png", 95, *defaults(app), api_name="/rerender")
+        result = client.predict(
+            img, "dummy", "png", 95, VIEWS[0], *defaults(app), api_name="/rerender"
+        )
         assert result[2].startswith("Updated")
         assert app.session.inference_count == 1
     finally:
@@ -272,7 +280,8 @@ def test_preset_roundtrip_sets_widgets(app):
     out = app.load_preset("Strong")
     model, *rest, status = out
     assert model == "dummy" and "Loaded" in status
-    assert rest[0] == 64 and rest[len(app.slots)] == 1.5
+    saturation = len(app.slots) + 1 + len(app.rslots)
+    assert rest[0] == 64 and rest[saturation] == 1.5
 
 
 def test_preset_errors(app):
@@ -285,7 +294,7 @@ def test_compare_runs_each_model_once(app, image_path, registry):
     other = type("Other", (DummyModel,), {"id": "other", "display_name": "Other"})
     registry.register(other)
     app2 = App(registry=registry, output_dir=app.output_dir, config_dir=app.config_dir)
-    vals = [s.param.default for s in app2.slots] + [p.default for p in POSTPROCESS_PARAMS]
+    vals = defaults(app2)
     *_, (gallery, status) = app2.compare(image_path, ["dummy", "other"], "cpu", *vals)
     assert [c for _, c in gallery] == [
         "Dummy (size=32, a=10.0, b=-20.0)",
@@ -354,3 +363,92 @@ def test_add_and_remove_points(registry, tmp_path):
     assert json.loads(value) == [[10, 20, [255, 0, 0]], [30, 40, [0, 255, 0]]]
     assert json.loads(app.remove_point(value, 0)) == [[30, 40, [0, 255, 0]]]
     app.worker.shutdown()
+
+
+# --- restoration ---------------------------------------------------------------------------
+
+
+def set_rparam(app, values, rid, name, value):
+    """Set a restorer widget value in a flat value list."""
+    index = next(i for i, s in enumerate(app.rslots) if (s.model_id, s.param.name) == (rid, name))
+    values[len(app.slots) + 1 + index] = value
+
+
+def test_every_registered_restorer_gets_widgets():
+    from colorizer.core.restore import RESTORE_PARAMS
+
+    app = App(registry=Registry())
+    try:
+        assert set(app.restorers) == {"realesrgan", "nafnet", "codeformer"}
+        for rid, rcls in app.restorers.items():
+            names = [s.param.name for s in app.rslots if s.model_id == rid]
+            assert names == [p.name for p in (*rcls.params, *RESTORE_PARAMS)]
+        assert app.coming_restorers == [
+            "SwinIR (not implemented yet)",
+            "SeedVR2 (not implemented yet)",
+        ]
+        assert "non-commercial" in app.restorer_info("codeformer")
+        app.build()  # every widget can be constructed
+    finally:
+        app.worker.shutdown()
+
+
+def test_restore_views_and_caching(app, image_path):
+    values = defaults(app, restore=["dummy_restore"])
+    set_rparam(app, values, "dummy_restore", "scale", 2)
+    (left, right), _, status = run_colorize(app, image_path, values)
+    assert left.shape == right.shape == (80, 100, 3)  # restored 2x; original upscaled to match
+    assert "Dummy restorer → Dummy" in status
+    assert app.session.restore_count == 1 and app.session.inference_count == 1
+
+    pairs = {}
+    for view in VIEWS:
+        pair, _, status = app.rerender(image_path, "dummy", "png", 95, view, *values)
+        assert status.startswith("Updated")
+        pairs[view] = pair
+    orig_restored = pairs["Original | Restored"]
+    assert all(np.ptp(img.astype(int), axis=2).max() <= 1 for img in orig_restored)  # both gray
+    assert np.ptp(pairs["Restored | Colorized"][1].astype(int), axis=2).max() > 5
+    assert app.session.restore_count == 1 and app.session.inference_count == 1
+
+    # Colorizer change: restoration reused, model runs again.
+    values[0] = 64
+    run_colorize(app, image_path, values)
+    assert app.session.restore_count == 1 and app.session.inference_count == 2
+    # Restore change: both run again; before Colorize, rerender asks for it.
+    set_rparam(app, values, "dummy_restore", "offset", 0.1)
+    _, _, status = app.rerender(image_path, "dummy", "png", 95, VIEWS[0], *values)
+    assert "Colorize" in status
+    run_colorize(app, image_path, values)
+    assert app.session.restore_count == 2 and app.session.inference_count == 3
+
+
+def test_restore_errors(app, image_path):
+    values = defaults(app, restore=["nope"])
+    with pytest.raises(gr.Error, match="unknown restorer"):
+        run_colorize(app, image_path, values)
+    values = defaults(app, restore=["dummy_restore"])
+    set_rparam(app, values, "dummy_restore", "blend", 2.0)
+    with pytest.raises(gr.Error):
+        run_colorize(app, image_path, values)
+
+
+def test_compare_restores_once(app, image_path):
+    values = defaults(app, restore=["dummy_restore"])
+    set_rparam(app, values, "dummy_restore", "scale", 2)
+    *_, (gallery, _) = app.compare(image_path, ["dummy"], "cpu", *values)
+    assert gallery[0][0].shape == (80, 100, 3) and app.session.restore_count == 1
+    run_colorize(app, image_path, values)
+    assert app.session.restore_count == 1 and app.session.inference_count == 1
+
+
+def test_preset_roundtrip_with_restore(app):
+    values = defaults(app, restore=["dummy_restore"])
+    set_rparam(app, values, "dummy_restore", "scale", 3)
+    app.save_preset("Up", "dummy", *values)
+    _, *rest, status = app.load_preset("Up")
+    assert "Loaded" in status
+    n = len(app.slots)
+    assert rest[n] == ["dummy_restore"]
+    scale_index = next(i for i, s in enumerate(app.rslots) if s.param.name == "scale")
+    assert rest[n + 1 + scale_index] == 3

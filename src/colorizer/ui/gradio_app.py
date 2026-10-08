@@ -1,8 +1,8 @@
 """Gradio UI.
 
-Widgets are generated from each model's ``Param`` schema; this module must stay free of
-model-specific code. Inference runs on the background worker; postprocess changes
-re-render from the cached ab without touching the model.
+Widgets are generated from each model's and restorer's ``Param`` schema; this module must
+stay free of model-specific code. Inference runs on the background worker; postprocess
+changes re-render from the cached ab, and colorizer changes reuse the cached restoration.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from typing import Any, TypeVar
 # Local-first: no launch telemetry or version pings. Must be set before gradio is imported.
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
+import cv2
 import gradio as gr
 import numpy as np
 
@@ -27,9 +28,22 @@ from colorizer.core import presets
 from colorizer.core.base import ColorizerModel
 from colorizer.core.batch import BatchItem, BatchResult, run_batch
 from colorizer.core.params import Param
-from colorizer.core.pipeline import EXTENSIONS, SUFFIX_FORMATS, OutputFormat, render, save_image
+from colorizer.core.pipeline import (
+    EXTENSIONS,
+    SUFFIX_FORMATS,
+    OutputFormat,
+    render,
+    save_image,
+    scale_points,
+)
 from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
 from colorizer.core.registry import Registry, default_registry
+from colorizer.core.restore import (
+    RESTORE_PARAMS,
+    Restorer,
+    RestoreStep,
+    validate_restore_params,
+)
 from colorizer.core.runtime import ENV_DEVICE, available_devices, select_device
 from colorizer.core.session import LRU, LoadedImage, Session
 from colorizer.core.worker import Cancelled, Job, JobContext, Worker
@@ -41,7 +55,9 @@ POLL_SECONDS = 0.1
 SETTINGS_FILE = "ui.json"
 THUMB_SIZE = 384
 T = TypeVar("T")
-Rendered = tuple[np.ndarray, np.ndarray, Path]  # before, after (uint8 RGB), saved file
+Rendered = tuple[tuple[np.ndarray, np.ndarray], Path]  # slider pair (uint8 RGB), saved file
+# Before/after pairs for the comparison slider.
+VIEWS = ("Original | Colorized", "Original | Restored", "Restored | Colorized")
 
 
 def widget_for(param: Param) -> gr.components.Component:
@@ -118,10 +134,17 @@ def to_uint8(rgb: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class Slot:
-    """One generated model-param widget."""
+    """One generated param widget of a model (or of a restorer, in ``App.rslots``)."""
 
     model_id: str
     param: Param
+
+
+@dataclass(frozen=True)
+class Settings:
+    params: dict[str, Any]
+    post: Postprocess
+    restore: list[RestoreStep]
 
 
 class App:
@@ -152,6 +175,24 @@ class App:
         if not self.models:
             raise RuntimeError("no models available")
         self.slots = [Slot(mid, p) for mid, cls in self.models.items() for p in cls.params]
+        self.restorers: dict[str, type[Restorer]] = {}
+        self.coming_restorers: list[str] = []  # registered stubs, shown as "not yet"
+        for rid in self.registry.restorers.ids():
+            try:
+                rcls = self.registry.restorers.get_class(rid)
+            except Exception as e:  # broken plugin
+                log.warning("restorer %s unavailable: %s", rid, e)
+                continue
+            if not rcls.enabled:
+                self.coming_restorers.append(rcls.display_name)
+            elif rcls.available():
+                self.restorers[rid] = rcls
+        # Each restorer's own params, then the shared ones (blend).
+        self.rslots = [
+            Slot(rid, p)
+            for rid, rcls in self.restorers.items()
+            for p in (*rcls.params, *RESTORE_PARAMS)
+        ]
         self._before: LRU[str, np.ndarray] = LRU(4)
         self._current: Job[Any] | None = None
         # Anything with available() / ask_save_path() / ask_directory() like file_dialog;
@@ -186,16 +227,15 @@ class App:
 
     # --- value plumbing -------------------------------------------------------------------
 
-    def split_values(
-        self, model_id: str, values: Sequence[Any]
-    ) -> tuple[dict[str, Any], Postprocess]:
-        """Map the flat widget values (all model slots, then postprocess) to params.
+    def n_values(self) -> int:
+        """Length of the flat value list: model slots, restore ids, restore slots, postprocess."""
+        return len(self.slots) + 1 + len(self.rslots) + len(POSTPROCESS_PARAMS)
 
-        Raises ``ValueError`` for invalid values.
-        """
-        n = len(self.slots)
-        if len(values) != n + len(POSTPROCESS_PARAMS):
-            raise ValueError(f"expected {n + len(POSTPROCESS_PARAMS)} values, got {len(values)}")
+    def split_all(self, model_id: str, values: Sequence[Any]) -> Settings:
+        """Map the flat widget values to validated settings. Raises ``ValueError``."""
+        if len(values) != self.n_values():
+            raise ValueError(f"expected {self.n_values()} values, got {len(values)}")
+        n, m = len(self.slots), len(self.rslots)
         params = {
             s.param.name: widget_value(s.param, v)
             for s, v in zip(self.slots, values[:n], strict=True)
@@ -204,29 +244,76 @@ class App:
         if model_id not in self.models:
             raise ValueError(f"unknown model {model_id!r}")
         params = self.models[model_id].validate_params(params)
+        restore_ids = values[n] or []
+        rvalues = values[n + 1 : n + 1 + m]
+        restore = []
+        for rid in restore_ids:
+            if rid not in self.restorers:
+                raise ValueError(f"unknown restorer {rid!r}")
+            own = {
+                s.param.name: widget_value(s.param, v)
+                for s, v in zip(self.rslots, rvalues, strict=True)
+                if s.model_id == rid
+            }
+            restore.append(RestoreStep(rid, validate_restore_params(self.restorers[rid], own)))
         post = Postprocess.from_mapping(
-            {p.name: v for p, v in zip(POSTPROCESS_PARAMS, values[n:], strict=True)}
+            {p.name: v for p, v in zip(POSTPROCESS_PARAMS, values[n + 1 + m :], strict=True)}
         )
-        return params, post
+        return Settings(params, post, restore)
+
+    def split_values(
+        self, model_id: str, values: Sequence[Any]
+    ) -> tuple[dict[str, Any], Postprocess]:
+        """Model params and postprocess from the flat widget values. Raises ``ValueError``."""
+        settings = self.split_all(model_id, values)
+        return settings.params, settings.post
+
+    def model_params_for(
+        self, model_id: str, params: dict[str, Any], image: LoadedImage, restored: LoadedImage
+    ) -> dict[str, Any]:
+        """Params for colorizing ``restored``: hint points move with any resolution change."""
+        schema = self.models[model_id].params
+        return scale_points(schema, params, image.src.size, restored.src.size)
+
+    def _gray(self, image: LoadedImage) -> np.ndarray:
+        """The image as neutral gray RGB uint8 (cached)."""
+        gray = self._before.get(image.digest)
+        if gray is None:
+            gray = to_uint8(render(image.src, np.zeros((1, 1, 2), np.float32)))
+            self._before.put(image.digest, gray)
+        return gray
 
     def _render(
         self,
         image: LoadedImage,
+        restored: LoadedImage,
         ab: np.ndarray,
         post: Postprocess,
         name: str,
         fmt: str,
         quality: int,
+        view: str = VIEWS[0],
     ) -> Rendered:
-        src = image.src
-        before = self._before.get(image.digest)
-        if before is None:
-            before = to_uint8(render(src, np.zeros((1, 1, 2), np.float32)))
-            self._before.put(image.digest, before)
+        """Colorize ``restored`` with ``ab``, save it, and pick the slider pair for ``view``."""
+        src = restored.src
         rgb = render(src, ab, post)
         out = self.output_dir / f"{Path(name).stem}_colorized{EXTENSIONS[fmt]}"
         save_image(rgb, out, fmt, src.bit_depth, src.exif, int(quality))  # type: ignore[arg-type]
-        return before, to_uint8(rgb), out
+        h, w = src.size
+        original = self._gray(image)
+        if original.shape[:2] != (h, w):  # restoration changed the size; display only
+            original = cv2.resize(original, (w, h), interpolation=cv2.INTER_CUBIC)
+        images = {
+            "Original": original,
+            "Restored": self._gray(restored),
+            "Colorized": to_uint8(rgb),
+        }
+        left, _, right = (view if view in VIEWS else VIEWS[0]).partition(" | ")
+        return (images[left], images[right]), out
+
+    def restore_status(self, steps: Sequence[RestoreStep]) -> str:
+        names = [self.restorers[s.id].display_name for s in steps]
+        return " → ".join(names) + " → " if names else ""
 
     # --- event handlers -------------------------------------------------------------------
 
@@ -237,13 +324,14 @@ class App:
         device_name: str,
         fmt: str,
         quality: float,
+        view: str,
         *values: Any,
     ) -> Iterator[tuple[Any, Any, str]]:
-        """Run inference on the worker, streaming progress into the status line."""
+        """Restore (optional) and colorize on the worker, streaming progress into the status."""
         if not image_path:
             raise gr.Error("Upload an image first.")
         try:
-            params, post = self.split_values(model_id, values)
+            settings = self.split_all(model_id, values)
             device = select_device(device_name)
         except ValueError as e:
             raise gr.Error(str(e)) from e
@@ -252,20 +340,25 @@ class App:
         def job_fn(ctx: JobContext) -> Rendered:
             ctx.progress(0.0, "Loading image")
             image = self.session.load(path)
-            ab = self.session.get_ab(image, model_id, params, device, ctx)
+            restored = self.session.get_restored(image, settings.restore, device, ctx)
+            params = self.model_params_for(model_id, settings.params, image, restored)
+            ab = self.session.get_ab(restored, model_id, params, device, ctx)
             ctx.progress(0.9, "Rendering")
-            return self._render(image, ab, post, path.name, fmt, int(quality))
+            return self._render(
+                image, restored, ab, settings.post, path.name, fmt, int(quality), view
+            )
 
         job = self._submit(job_fn)
         try:
             for progress in self._follow(job):
                 yield gr.skip(), gr.skip(), progress
             try:
-                before, after, out = self._result(job)
+                pair, out = self._result(job)
             except Cancelled:
                 yield gr.skip(), gr.skip(), "Cancelled."
                 return
-            yield (before, after), str(out), f"Done: {self.models[model_id].display_name}."
+            chain = self.restore_status(settings.restore)
+            yield pair, str(out), f"Done: {chain}{self.models[model_id].display_name}."
         finally:
             job.cancel()  # no-op when finished; stops the job if Gradio closed this generator
 
@@ -313,20 +406,24 @@ class App:
         if not model_ids:
             raise gr.Error("Select at least one model to compare.")
         try:
-            settings = {mid: self.split_values(mid, values) for mid in model_ids}
+            settings = {mid: self.split_all(mid, values) for mid in model_ids}
             device = select_device(device_name)
         except ValueError as e:
             raise gr.Error(str(e)) from e
         path = Path(image_path)
+        steps = next(iter(settings.values())).restore  # shared by all models
 
         def job_fn(ctx: JobContext) -> list[tuple[np.ndarray, str]]:
             image = self.session.load(path)
+            restored = self.session.get_restored(image, steps, device)  # once, then cached
             results = []
-            for i, (mid, (params, post)) in enumerate(settings.items()):
+            for i, (mid, s) in enumerate(settings.items()):
                 name = self.models[mid].display_name
                 ctx.progress(i / len(settings), f"{i + 1}/{len(settings)}: {name}")
-                ab = self.session.get_ab(image, mid, params, device)
-                results.append((to_uint8(render(image.src, ab, post)), self.caption(mid, params)))
+                params = self.model_params_for(mid, s.params, image, restored)
+                ab = self.session.get_ab(restored, mid, params, device)
+                rgb = render(restored.src, ab, s.post)
+                results.append((to_uint8(rgb), self.caption(mid, s.params)))
             return results
 
         job = self._submit(job_fn)
@@ -364,7 +461,7 @@ class App:
         if not out_dir.strip():
             raise gr.Error("Choose an output folder.")
         try:
-            params, post = self.split_values(model_id, values)
+            settings = self.split_all(model_id, values)
             device = select_device(device_name)
         except ValueError as e:
             raise gr.Error(str(e)) from e
@@ -379,11 +476,13 @@ class App:
             return run_batch(
                 items,
                 lambda: self.registry.get(model_id, device),
-                params,
-                post,
+                settings.params,
+                settings.post,
                 quality=int(quality),
                 overwrite=overwrite,
                 ctx=ctx,
+                restore=settings.restore,
+                get_restorer=lambda rid: self.registry.restorers.get(rid, device),
             )
 
         job = self._submit(job_fn)
@@ -439,16 +538,19 @@ class App:
     def save_preset(self, name: str, model_id: str, *values: Any) -> tuple[Any, str]:
         try:
             name = presets.check_name(name)
-            params, post = self.split_values(model_id, values)
+            s = self.split_all(model_id, values)
         except ValueError as e:
             return gr.skip(), f"Can't save preset: {e}."
-        preset = presets.Preset(model_id, params, post.to_dict())
+        preset = presets.Preset(model_id, s.params, s.post.to_dict(), tuple(s.restore))
         presets.save_preset(name, preset, self.presets_dir)
         return gr.update(choices=self.preset_names(), value=name), f"Saved preset **{name}**."
 
     def load_preset(self, name: str | None) -> list[Any]:
-        """Set the model, its widgets and postprocess from a preset (other models untouched)."""
-        n_out = 1 + len(self.slots) + len(POSTPROCESS_PARAMS)
+        """Set the model, its widgets, the restore chain and postprocess from a preset.
+
+        Widgets of other models and of restorers not in the chain are left untouched.
+        """
+        n_out = 1 + self.n_values()
         if not name:
             return [gr.skip()] * n_out + ["Pick a preset to load."]
         try:
@@ -457,6 +559,16 @@ class App:
             return [gr.skip()] * n_out + [f"Can't load preset: {e}"]
         if preset.model not in self.models:
             return [gr.skip()] * n_out + [f"Preset uses unavailable model {preset.model!r}."]
+        missing = [s.id for s in preset.restore if s.id not in self.restorers]
+        if missing:
+            return [gr.skip()] * n_out + [f"Preset uses unavailable restorer(s) {missing}."]
+        chain = {s.id: s.params for s in preset.restore}
+        rslot_values = [
+            _to_widget(s.param, chain[s.model_id][s.param.name])
+            if s.model_id in chain
+            else gr.skip()
+            for s in self.rslots
+        ]
         slot_values = [
             _to_widget(s.param, preset.params[s.param.name])
             if s.model_id == preset.model
@@ -465,7 +577,8 @@ class App:
         ]
         post_values = [preset.postprocess[p.name] for p in POSTPROCESS_PARAMS]
         status = f"Loaded preset **{name}**. Press **Colorize** to apply."
-        return [preset.model, *slot_values, *post_values, status]
+        restore_ids = [s.id for s in preset.restore]
+        return [preset.model, *slot_values, restore_ids, *rslot_values, *post_values, status]
 
     def delete_preset(self, name: str | None) -> tuple[Any, str]:
         if not name:
@@ -523,7 +636,7 @@ class App:
         if not image_path:
             return gr.skip(), "Upload and colorize an image first."
         try:
-            params, post = self.split_values(model_id, values)
+            settings = self.split_all(model_id, values)
             path, out_fmt = self.resolve_save_path(dest, image_path, fmt)
         except ValueError as e:
             return gr.skip(), f"Can't save: {e}."
@@ -533,13 +646,15 @@ class App:
                 "Tick *Overwrite* or choose another name."
             )
         image = self.session.load(Path(image_path))
-        ab = self.session.cached_ab(image, model_id, params)
-        if ab is None:
-            return str(path), "Press **Colorize** first: the current model settings have no result."
-        src = image.src
+        restored = self.session.cached_restored(image, settings.restore)
+        params = self.model_params_for(model_id, settings.params, image, restored or image)
+        ab = None if restored is None else self.session.cached_ab(restored, model_id, params)
+        if restored is None or ab is None:
+            return str(path), "Press **Colorize** first: the current settings have no result."
+        src = restored.src
         try:
             save_image(
-                render(src, ab, post),
+                render(src, ab, settings.post),
                 path,
                 out_fmt,  # type: ignore[arg-type]
                 src.bit_depth,
@@ -583,22 +698,34 @@ class App:
         return "Cancelled."
 
     def rerender(
-        self, image_path: str | None, model_id: str, fmt: str, quality: float, *values: Any
+        self,
+        image_path: str | None,
+        model_id: str,
+        fmt: str,
+        quality: float,
+        view: str,
+        *values: Any,
     ) -> tuple[Any, Any, Any]:
-        """Re-apply postprocess/output settings using the cached ab. Never runs the model."""
+        """Re-apply postprocess/output/view settings from the caches. Never runs a model."""
         if not image_path:
             return gr.skip(), gr.skip(), gr.skip()
         try:
-            params, post = self.split_values(model_id, values)
+            settings = self.split_all(model_id, values)
         except ValueError as e:
             return gr.skip(), gr.skip(), f"Invalid setting: {e}"
         path = Path(image_path)
         image = self.session.load(path)
-        ab = self.session.cached_ab(image, model_id, params)
+        restored = self.session.cached_restored(image, settings.restore)
+        if restored is None:
+            return gr.skip(), gr.skip(), "Press **Colorize** to apply the current restore settings."
+        params = self.model_params_for(model_id, settings.params, image, restored)
+        ab = self.session.cached_ab(restored, model_id, params)
         if ab is None:
             return gr.skip(), gr.skip(), "Press **Colorize** to apply the current model settings."
-        before, after, out = self._render(image, ab, post, path.name, fmt, int(quality))
-        return (before, after), str(out), "Updated (no re-inference)."
+        pair, out = self._render(
+            image, restored, ab, settings.post, path.name, fmt, int(quality), view
+        )
+        return pair, str(out), "Updated (no re-inference)."
 
     def select_model(self, model_id: str) -> list[Any]:
         return [
@@ -634,6 +761,17 @@ class App:
         cls = self.models[model_id]
         return f"**{cls.display_name}** · license: {cls.license}"
 
+    def select_restorers(self, restore_ids: list[str] | None) -> list[Any]:
+        chosen = set(restore_ids or [])
+        return [gr.update(visible=rid in chosen) for rid in self.restorers]
+
+    def restorer_info(self, rid: str) -> str:
+        rcls = self.restorers[rid]
+        text = f"**{rcls.display_name}** · license: {rcls.license}"
+        if rcls.warning:
+            text += f"\n\n⚠️ **{rcls.warning}**"
+        return text
+
     # --- layout ---------------------------------------------------------------------------
 
     def build(self) -> gr.Blocks:
@@ -652,6 +790,28 @@ class App:
                         height=320,
                         sources=["upload", "clipboard"],
                     )
+                    with gr.Accordion("Restore (optional, before colorizing)", open=True):
+                        coming = (
+                            f" Not implemented yet: {', '.join(self.coming_restorers)}."
+                            if self.coming_restorers
+                            else ""
+                        )
+                        restore_dd = gr.Dropdown(
+                            choices=[(c.display_name, rid) for rid, c in self.restorers.items()],
+                            value=[],
+                            multiselect=True,
+                            label="Restorers",
+                            info="Run in the order selected; results are cached." + coming,
+                        )
+                        restore_groups = []
+                        restore_widgets: list[gr.components.Component] = []
+                        for rid, rcls in self.restorers.items():
+                            with gr.Group(visible=False) as rgroup:
+                                gr.Markdown(self.restorer_info(rid))
+                                restore_widgets.extend(
+                                    widget_for(p) for p in (*rcls.params, *RESTORE_PARAMS)
+                                )
+                            restore_groups.append(rgroup)
                     model_dd = gr.Dropdown(
                         choices=[(cls.display_name, mid) for mid, cls in self.models.items()],
                         value=first,
@@ -730,6 +890,9 @@ class App:
                             # Lossless preview: Gradio's default WebP is lossy, and right-click
                             # "Save image as" saves these bytes. The download button gives the
                             # real output file in the chosen format.
+                            view = gr.Radio(
+                                list(VIEWS), value=VIEWS[0], label="Compare", show_label=False
+                            )
                             slider = gr.ImageSlider(
                                 label="Before / after", type="numpy", format="png", max_height=720
                             )
@@ -776,15 +939,16 @@ class App:
                             )
                             batch_gallery = gr.Gallery(label="Done", columns=4, format="png")
 
-            values = [*model_widgets, *post_widgets]
+            values = [*model_widgets, restore_dd, *restore_widgets, *post_widgets]
             outputs = [slider, download, status]
 
             model_dd.change(
                 self.select_model, model_dd, [*groups, model_info, hints_group], api_name=False
             )
+            restore_dd.change(self.select_restorers, restore_dd, restore_groups, api_name=False)
             run = run_btn.click(
                 self.colorize,
-                [image, model_dd, device_dd, fmt_dd, quality, *values],
+                [image, model_dd, device_dd, fmt_dd, quality, view, *values],
                 outputs,
                 api_name="colorize",
             )
@@ -816,7 +980,7 @@ class App:
                 self.browse_batch_dir, batch_dir, [batch_dir, status], api_name=False
             )
 
-            rerender_inputs = [image, model_dd, fmt_dd, quality, *values]
+            rerender_inputs = [image, model_dd, fmt_dd, quality, view, *values]
             # Sliders fire on release, not on every drag step. The first one also exposes
             # the named "rerender" API endpoint (used by scripts and tests).
             for i, w in enumerate(post_widgets):
@@ -827,11 +991,11 @@ class App:
                     outputs,
                     api_name="rerender" if i == 0 else False,
                 )
-            for w in (fmt_dd, quality):
+            for w in (fmt_dd, quality, view):
                 event = w.release if isinstance(w, gr.Slider) else w.change
                 event(self.rerender, rerender_inputs, outputs, api_name=False)
 
-            run_inputs = [image, model_dd, device_dd, fmt_dd, quality, *values]
+            run_inputs = [image, model_dd, device_dd, fmt_dd, quality, view, *values]
             for slot_index, widget in zip(self.point_slots(), point_widgets, strict=True):
                 slot_model = self.slots[slot_index].model_id
 
