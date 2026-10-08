@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import cv2
@@ -25,6 +26,14 @@ RESTORE_PARAMS: tuple[Param, ...] = (
     ),
 )
 _SHARED_NAMES = frozenset(p.name for p in RESTORE_PARAMS)
+
+
+@dataclass(frozen=True)
+class RestoreStep:
+    """One stage of a restore chain: a restorer id and its params (own + shared)."""
+
+    id: str
+    params: Mapping[str, Any] = field(default_factory=dict)
 
 
 class Restorer(Plugin):

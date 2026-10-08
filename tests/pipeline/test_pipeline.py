@@ -160,3 +160,47 @@ def test_ab_smooth_defaults_to_off():
 
     assert Postprocess().ab_smooth == 0.0
     assert {p.name: p.default for p in POSTPROCESS_PARAMS}["ab_smooth"] == 0.0
+
+
+def test_restore_runs_before_colorizing_and_may_upscale(tmp_path, model):
+    from tests.conftest import DummyRestorer
+
+    Image.fromarray(gradient()).save(tmp_path / "in.png")
+    restorer = DummyRestorer()
+    pipeline.colorize_file(
+        tmp_path / "in.png",
+        tmp_path / "out.png",
+        model,
+        {},
+        restore=[(restorer, {"scale": 2}), (restorer, {"offset": 0.1, "blend": 0.5})],
+    )
+    assert np.asarray(Image.open(tmp_path / "out.png")).shape == (80, 120, 3)
+    assert restorer.calls == [{"scale": 2, "offset": 0.0}, {"scale": 1, "offset": 0.1}]
+
+
+def test_restore_params_all_validated_before_any_step_runs():
+    from tests.conftest import DummyRestorer
+
+    restorer = DummyRestorer()
+    src = SourceImage.from_rgb(gradient())
+    with pytest.raises(ValueError):
+        pipeline.restore_image(src, [(restorer, {}), (restorer, {"blend": 2.0})])
+    assert restorer.calls == []
+    assert pipeline.restore_image(src, []) is src
+
+
+def test_restored_L_is_the_output_L():
+    from tests.conftest import DummyRestorer
+
+    src = SourceImage.from_rgb(gradient())
+    restored = pipeline.restore_image(src, [(DummyRestorer(), {"offset": 0.2})])
+    assert restored.size == src.size and restored.L.mean() > src.L.mean()
+    from skimage.color import rgb2lab
+
+    out = render(restored, np.full((4, 4, 2), 20.0, np.float32))
+    assert np.abs(rgb2lab(out)[..., 0] - restored.L).max() < 1e-2
+
+
+def test_gray_L_conversions_are_inverse():
+    L = np.linspace(0, 100, 10001, dtype=np.float32)
+    assert np.abs(pipeline.gray_to_L(pipeline.L_to_gray(L)) - L).max() < 1e-3

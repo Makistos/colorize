@@ -57,3 +57,33 @@ def test_cancel_between_files(tmp_path):
         job.result(timeout=10)
     worker.shutdown()
     assert [p.exists() for p in (i.dst for i in items)] == [True, False, False, False, False]
+
+
+def test_batch_runs_restore_chain(tmp_path):
+    from colorizer.core.restore import RestoreStep
+    from tests.conftest import DummyRestorer
+
+    items = make_items(tmp_path, 2)
+    loaded = []
+
+    def get_restorer(rid):
+        loaded.append(rid)
+        return DummyRestorer()
+
+    result = run_batch(
+        items,
+        model,
+        {},
+        Postprocess(),
+        restore=[RestoreStep("dummy_restore", {"scale": 2})],
+        get_restorer=get_restorer,
+    )
+    assert len(result.done) == 2 and loaded == ["dummy_restore"]
+    assert Image.open(items[0].dst).size == (20, 20)
+
+
+def test_batch_restore_needs_a_loader(tmp_path):
+    from colorizer.core.restore import RestoreStep
+
+    with pytest.raises(ValueError, match="get_restorer"):
+        run_batch(make_items(tmp_path, 1), model, {}, Postprocess(), restore=[RestoreStep("x")])

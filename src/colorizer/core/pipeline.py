@@ -1,9 +1,9 @@
-"""load → Lab split → infer → recombine → postprocess → save."""
+"""load → [restore …] → Lab split → infer → recombine → postprocess → save."""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +16,7 @@ from skimage.color import rgb2lab
 from colorizer.core import postprocess
 from colorizer.core.base import ColorizerModel
 from colorizer.core.postprocess import Postprocess
+from colorizer.core.restore import Restorer, run_restorer, validate_restore_params
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,35 @@ def load_image(path: Path) -> SourceImage:
         return SourceImage.from_rgb(np.clip(gray, 0.0, 1.0), bit_depth=16, exif=exif_bytes)
     rgb = np.asarray(im.convert("RGB"))
     return SourceImage.from_rgb(rgb, bit_depth=8, exif=exif_bytes)
+
+
+def L_to_gray(L: np.ndarray) -> np.ndarray:
+    """L in [0, 100] -> the sRGB value (float32 in [0, 1]) of the neutral gray with that L."""
+    lin = _finv((L.astype(np.float64) + 16.0) / 116.0)
+    gray = np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * np.maximum(lin, 0) ** (1 / 2.4) - 0.055)
+    return np.clip(gray, 0.0, 1.0).astype(np.float32)
+
+
+def gray_to_L(gray: np.ndarray) -> np.ndarray:
+    """Inverse of ``L_to_gray``: sRGB gray in [0, 1] -> L (float32 in [0, 100])."""
+    g = np.clip(gray.astype(np.float64), 0.0, 1.0)
+    Y = np.where(g <= 0.04045, g / 12.92, ((g + 0.055) / 1.055) ** 2.4)
+    f = np.where(Y > (6 / 29) ** 3, np.cbrt(Y), Y / (3 * (6 / 29) ** 2) + 4 / 29)
+    return (116.0 * f - 16.0).astype(np.float32)
+
+
+def restore_image(
+    src: SourceImage, steps: Sequence[tuple[Restorer, Mapping[str, Any]]]
+) -> SourceImage:
+    """Run restorers in order on the grayscale image. All params are validated first."""
+    for restorer, params in steps:
+        validate_restore_params(type(restorer), params)
+    if not steps:
+        return src
+    gray = L_to_gray(src.L)
+    for restorer, params in steps:
+        gray = run_restorer(restorer, gray, params)
+    return SourceImage(L=gray_to_L(gray), bit_depth=src.bit_depth, exif=src.exif)
 
 
 def infer_ab(src: SourceImage, model: ColorizerModel, params: Mapping[str, Any]) -> np.ndarray:
@@ -213,8 +243,9 @@ def colorize_file(
     post: Postprocess | None = None,
     fmt: OutputFormat = "png",
     quality: int = 95,
+    restore: Sequence[tuple[Restorer, Mapping[str, Any]]] = (),
 ) -> None:
-    src = load_image(src_path)
+    src = restore_image(load_image(src_path), restore)
     ab = infer_ab(src, model, params)
     rgb = render(src, ab, post)
     save_image(rgb, dst_path, fmt=fmt, bit_depth=src.bit_depth, exif=src.exif, quality=quality)

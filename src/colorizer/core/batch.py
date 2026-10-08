@@ -11,6 +11,7 @@ from typing import Any
 from colorizer.core.base import ColorizerModel
 from colorizer.core.pipeline import OutputFormat, colorize_file
 from colorizer.core.postprocess import Postprocess
+from colorizer.core.restore import Restorer, RestoreStep
 from colorizer.core.worker import JobContext
 
 log = logging.getLogger(__name__)
@@ -42,10 +43,13 @@ def run_batch(
     quality: int = 95,
     overwrite: bool = False,
     ctx: JobContext | None = None,
+    restore: Sequence[RestoreStep] = (),
+    get_restorer: Callable[[str], Restorer] | None = None,
 ) -> BatchResult:
     """Colorize ``items``, skipping existing outputs unless ``overwrite``.
 
-    The model is loaded (``get_model``) only if something needs doing; a load failure
+    ``restore`` steps run before colorization, with restorers from ``get_restorer(id)``.
+    The model and restorers are loaded only if something needs doing; a load failure
     propagates. Per-file errors are collected, not raised. Cancellation via ``ctx`` raises
     ``Cancelled`` between files.
     """
@@ -61,13 +65,25 @@ def run_batch(
         return result
     if ctx:
         ctx.progress(0.0, "Loading model")
+    if restore and get_restorer is None:
+        raise ValueError("restore steps given without get_restorer")
     model = get_model()
+    chain = [(get_restorer(step.id), step.params) for step in restore] if get_restorer else []
     n = len(pending)
     for i, item in enumerate(pending, 1):
         if ctx:
             ctx.progress((i - 1) / n, f"{i}/{n}: {item.src.name}")
         try:
-            colorize_file(item.src, item.dst, model, params, post, fmt=item.fmt, quality=quality)
+            colorize_file(
+                item.src,
+                item.dst,
+                model,
+                params,
+                post,
+                fmt=item.fmt,
+                quality=quality,
+                restore=chain,
+            )
         except Exception as e:
             log.error("[%d/%d] FAILED %s: %s", i, n, item.src, e)
             log.debug("traceback", exc_info=True)
