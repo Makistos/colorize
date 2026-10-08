@@ -9,6 +9,7 @@ import pytest
 from colorizer.core.base import ColorizerModel
 from colorizer.core.params import Param
 from colorizer.core.registry import Registry
+from colorizer.core.restore import Restorer
 from colorizer.core.runtime import Device
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -48,11 +49,44 @@ class DummyModel(ColorizerModel):
         return ab
 
 
+class DummyRestorer(Restorer):
+    """Upscales by ``scale`` (nearest) and adds ``offset``. Records calls for assertions."""
+
+    id = "dummy_restore"
+    display_name = "Dummy restorer"
+    license = "test"
+    params = (
+        Param("scale", "int", 1, min=1, max=4),
+        Param("offset", "float", 0.0, min=-1.0, max=1.0),
+    )
+    instances: ClassVar[list[DummyRestorer]] = []
+
+    def __init__(self) -> None:
+        self.loaded_on: Device | None = None
+        self.unloaded = False
+        self.calls: list[dict[str, Any]] = []
+        DummyRestorer.instances.append(self)
+
+    def load(self, device: Device) -> None:
+        self.loaded_on = device
+
+    def unload(self) -> None:
+        self.unloaded = True
+
+    def restore(self, gray: np.ndarray, **params: Any) -> np.ndarray:
+        assert gray.dtype == np.float32 and gray.ndim == 2
+        self.calls.append(params)
+        s = params["scale"]
+        return np.repeat(np.repeat(gray, s, axis=0), s, axis=1) + params["offset"]
+
+
 @pytest.fixture
 def registry() -> Registry:
     DummyModel.instances.clear()
+    DummyRestorer.instances.clear()
     reg = Registry(discover=False)
     reg.register(DummyModel)
+    reg.restorers.register(DummyRestorer)
     return reg
 
 

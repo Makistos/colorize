@@ -60,6 +60,9 @@ colorizer-app = "colorizer.ui.desktop:main"
 # Third-party packages register models here, e.g. `mymodel = "pkg.module:MyModel"`.
 # Built-ins live in colorizer.core.registry.BUILTIN_MODELS.
 
+[project.entry-points."colorizer.restorers"]
+# Same for restorers (colorizer.core.restore.Restorer); built-ins: BUILTIN_RESTORERS.
+
 [dependency-groups]
 dev = [
     "pytest>=8.2",

@@ -64,3 +64,31 @@ def test_lru_eviction():
     assert not a.unloaded
     reg.unload_all()
     assert reg.loaded_ids() == [] and a.unloaded
+
+
+def test_restorers_registered_separately(registry):
+    assert registry.ids() == ["dummy"] and registry.restorers.ids() == ["dummy_restore"]
+    r = registry.restorers.get("dummy_restore", CPU)
+    assert registry.restorers.get("dummy_restore", CPU) is r and r.loaded_on == CPU
+    with pytest.raises(ValueError, match="unknown restorer"):
+        registry.restorers.get_class("dummy")
+    registry.unload_all()
+    assert r.unloaded and registry.restorers.loaded_ids() == []
+
+
+def test_restorer_entry_point_and_type_check(monkeypatch):
+    def eps(group):
+        if group == registry_mod.RESTORER_ENTRY_POINT_GROUP:
+            return [
+                EntryPoint("dummy_restore", "tests.conftest:DummyRestorer", group),
+                EntryPoint("wrong", "tests.conftest:DummyModel", group),
+            ]
+        return []
+
+    monkeypatch.setattr(registry_mod, "entry_points", eps)
+    reg = Registry()
+    from tests.conftest import DummyRestorer
+
+    assert reg.restorers.get_class("dummy_restore") is DummyRestorer
+    with pytest.raises(TypeError, match="not a Restorer subclass"):
+        reg.restorers.get_class("wrong")
