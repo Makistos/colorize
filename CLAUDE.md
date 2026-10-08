@@ -1,6 +1,6 @@
 # Colorizer — Project Spec for Claude Code
 
-AI colorization of black-and-white photographs. Local-first, cross-platform (Linux primary; Windows/macOS should work). Multiple selectable models, each with editable parameters.
+AI colorization of black-and-white photographs, with optional restoration (denoise, deblur, upscale, faces) before colorizing. Local-first, cross-platform (Linux primary; Windows/macOS should work). Multiple selectable models, each with editable parameters.
 
 ## Stack
 
@@ -22,6 +22,10 @@ COLORIZER_TEST_WEIGHTS=1 uv run pytest -m weights   # real-model tests
 uv run --group export python tools/export_onnx/zhang.py   # ECCV16 + SIGGRAPH17 ONNX export (CPU torch)
 uv run --group export python tools/export_onnx/deoldify.py   # DeOldify, rebuilt without fastai
 uv run --group export python tools/export_onnx/ddcolor.py    # DDColor, uses upstream code at a pinned commit
+uv run --group export python tools/export_onnx/realesrgan.py # restorers: re-implemented archs, no upstream code run
+uv run --group export python tools/export_onnx/nafnet.py
+uv run --group export python tools/export_onnx/codeformer.py
+uv run colorizer in/ out/ --restore nafnet,realesrgan --rparam realesrgan.scale=4 --rparam nafnet.blend=0.7
 uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
 ```
 
@@ -31,21 +35,27 @@ uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
 src/colorizer/
   core/
     params.py      # Param dataclass + validation
-    base.py        # ColorizerModel ABC
-    registry.py    # model discovery (entry points + built-ins)
-    pipeline.py    # load → Lab split → infer → recombine → postprocess
+    base.py        # Plugin base; ColorizerModel ABC
+    restore.py     # Restorer ABC, shared restore params (blend), RestoreStep
+    registry.py    # model + restorer discovery (entry points + built-ins), LRU caches
+    pipeline.py    # load → [restore…] → Lab split → infer → recombine → postprocess
     postprocess.py # saturation, temperature, chroma blend, ab denoise
     runtime.py     # device / ONNX execution provider selection
     weights.py     # download, cache (~/.cache/colorizer), checksum
     worker.py      # background job queue, cancellation, progress
     batch.py       # many files, one model/settings (CLI + UI batch)
-    presets.py     # named {model, params, postprocess} JSON presets
-    session.py     # UI caches: decoded images + ab per image/model/params hash
+    presets.py     # named {model, params, postprocess, restore} JSON presets
+    session.py     # UI caches: decoded images, restore chain results, ab per image/model/params
   models/
     zhang.py       # ECCV16 + SIGGRAPH17 (with user hints)
     ddcolor.py
     deoldify.py
     sd_controlnet.py   # optional extra: `uv sync --extra diffusion`
+    realesrgan.py  # restorers…
+    nafnet.py
+    codeformer.py
+    stubs.py       # swinir, seedvr2: registered, enabled = False
+    _onnx.py, _tiles.py  # shared ONNX download/session plumbing, tiled inference
   ui/
     gradio_app.py  # builds widgets from Param schema
   cli.py
@@ -67,38 +77,55 @@ class Param:
     help: str = ""
 
 
-class ColorizerModel(ABC):
+class Plugin(ABC):  # shared by models and restorers
     id: ClassVar[str]  # "ddcolor"
     display_name: ClassVar[str]
     params: ClassVar[tuple[Param, ...]]
     license: ClassVar[str]  # shown in UI
+    step_callback: Callable[[float], None] | None  # set by the caller; may raise Cancelled
 
     @abstractmethod
     def load(self, device: Device) -> None: ...
+    def unload(self) -> None: ...
+
+
+class ColorizerModel(Plugin):
     @abstractmethod
     def predict_ab(self, L: np.ndarray, **params) -> np.ndarray:
         """L: float32 HxW in [0,100]. Returns ab: float32 h x w x 2 (any size; pipeline resizes)."""
 
-    def unload(self) -> None: ...
+
+class Restorer(Plugin):  # core/restore.py
+    enabled: ClassVar[bool] = True  # False = registered stub, rejected by validation
+    warning: ClassVar[str] = ""  # shown in the UI / logged by the CLI (e.g. non-commercial)
+
+    @abstractmethod
+    def restore(self, gray: np.ndarray, **params) -> np.ndarray:
+        """gray: float32 HxW in [0, 1] (sRGB-encoded). Returns float32 H'xW' in [0, 1]
+        (resolution may change)."""
 ```
 
 Rules:
-- The UI must never contain model-specific code. Widgets are generated from `params`.
-- Unknown or out-of-range params raise `ValueError` before inference.
-- Models load lazily on first use and are cached; LRU-unload when switching if VRAM is tight.
+- The UI must never contain model- or restorer-specific code. Widgets are generated from `params`.
+- Unknown or out-of-range params raise `ValueError` before inference (for a restore chain: before any step runs).
+- Models and restorers load lazily on first use and are cached (`Registry`, `Registry.restorers`); LRU-unload when switching if VRAM is tight.
+- Restorers are discovered from `BUILTIN_RESTORERS` and the `colorizer.restorers` entry-point group.
 
 ## Pipeline (pipeline.py)
 
 1. Load image and apply EXIF orientation. Treat as grayscale even if the file is RGB (old scans are often sepia: convert to L).
-2. RGB → Lab. Keep the **full-resolution L**.
-3. The model receives the L channel resized to its working size and returns ab.
-4. Upscale ab to the original size (bicubic), recombine with the original L, and convert Lab → RGB.
-5. Apply postprocess params (shared across all models):
+2. Optional restore chain (`restore_image`): L → sRGB gray, each restorer in order (each may change the size), then the shared `blend` per step: mix with the bicubic-upscaled input (0–1, default 1) to limit invented detail; gray → L. The restored image replaces the original from here on (its size is the output size). `points` params are rescaled to the restored size (`scale_points`).
+3. RGB → Lab. Keep the **full-resolution L**.
+4. The model receives the L channel resized to its working size and returns ab.
+5. Upscale ab to the (restored) image size (bicubic), recombine with that full-resolution L, and convert Lab → RGB. Out-of-gamut pixels lose chroma at constant hue (`lab_to_rgb`), never lightness: the output L equals the input L.
+6. Apply postprocess params (shared across all models):
    - `saturation` float 0–2 (default 1.0): scales ab
    - `temperature` float −1–1, `tint` float −1–1: shift b / a
    - `chroma_blend` float 0–1 (default 1.0): mix ab with zero (grayscale)
    - `ab_smooth` float 0–5: Gaussian blur sigma on ab only
-6. Save the result, preserving EXIF. Output formats: PNG, JPEG (quality param), TIFF (16-bit if the input was 16-bit).
+7. Save the result, preserving EXIF. Output formats: PNG, JPEG (quality param), TIFF (16-bit if the input was 16-bit).
+
+Caching (`session.py`): each restore step's result is cached under a key chained from the image hash and every step so far (id + validated params). Colorizer and postprocess changes reuse it; the restored image's key is its identity in the ab cache, so restore changes invalidate ab too.
 
 ## Models
 
@@ -116,6 +143,19 @@ ONNX builds are hosted as assets of the `models-v1` GitHub release (URL + SHA256
 
 Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH17 hints → SD.
 
+### Restorers
+
+All take the shared `blend` param too. Gray input is replicated to RGB for these RGB-trained networks and the output averaged back. Upstream SHA256s and URLs are in each module; license texts in `packaging/licenses/`.
+
+| id | Source (license) | Params | Notes |
+|---|---|---|---|
+| `realesrgan` | xinntao/Real-ESRGAN `realesr-general-x4v3` (BSD-3) | `scale` int 2\|4 (default 2); `tile` int 0–2048 step 32 (0 = off, default 512); `denoise_strength` float 0–1 (default 0.5) | Denoise = upstream DNI between the general and `wdn` weights, done inside the ONNX graph (`denoise` input): ORT ignores initializer overrides for prepacked weights at the default optimization level. Scale 2 = x4 then Lanczos down (upstream `--outscale`). |
+| `nafnet` | megvii-research/NAFNet (MIT) | `variant` choice [deblur, denoise] (default denoise) | GoPro-width64 / SIDD-width64; weights from a HF mirror pinned by commit, byte-identical to the official Google Drive files. 384 px tiles (≈ upstream NAFNetLocal), padded to multiples of 16. Denoise slightly smooths already-clean images; use `blend`. |
+| `codeformer` | sczhou/CodeFormer (S-Lab License 1.0, **non-commercial**) | `fidelity` float 0–1 (default 0.7); `upscale_bg` bool (default false: same size; true: 2x via Real-ESRGAN) | Faces via OpenCV YuNet (MIT, HF `opencv/face_detection_yunet` pinned), FFHQ 5-point alignment, feathered square paste-back (no face-parsing net), tone-matched like upstream's gray path. `warning` shown in the UI. |
+| `swinir`, `seedvr2` | JingyunLiang/SwinIR, ByteDance-Seed/SeedVR (Apache-2.0) | — | Stubs: registered, `enabled = False`. |
+
+Restorer ONNX files are **not hosted yet**: run their export scripts once (they are not in `ONNX_SHA256`, so the app raises with the export command). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch (NAFNet also checks that a degraded photo improves; on uniform noise it is ill-conditioned even in float64, so its check uses a real photo).
+
 ## Runtime (runtime.py)
 
 - ONNX provider priority: CUDA → ROCm → DirectML → CoreML → WebGPU → CPU. Pick the first one listed by `onnxruntime.get_available_providers()`. WebGPU (extra `webgpu`, Vulkan via Dawn) is the supported path for AMD GPUs on Linux: the ROCm EP was removed upstream and MIGraphX needs a system ROCm install.
@@ -131,15 +171,18 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 - Output: before/after comparison slider (`gr.ImageSlider` if available, else side by side), download button.
 - Save to a chosen path: "Save to" textbox (extension sets the format; default `<last dir>/<stem>_colorized.<ext>`), "Save" (refuses to overwrite unless ticked) and "Save as…" (native dialog via kdialog/zenity/tkinter in a subprocess, `ui/file_dialog.py`). Last folder is stored in `~/.config/colorizer/ui.json`.
 - "Compare models" tab runs the same image through N selected models and shows a grid.
-- Presets: save/load JSON `{model, params, postprocess}` in `~/.config/colorizer/presets/`.
+- Presets: save/load JSON `{model, params, postprocess, restore}` in `~/.config/colorizer/presets/`; `restore` is an optional list of `{id, params}` (older presets load unchanged).
+- Restore section above the model dropdown: a multi-select of enabled restorers (chain order = selection order) with a visibility-toggled param group per restorer (its params + `blend`, license, warning); stubs are listed as not implemented. The compare view switch shows Original | Colorized, Original | Restored or Restored | Colorized and re-renders from the caches. Compare runs the chain once for all models; batch runs it per file.
 - SIGGRAPH17 hints: click on the image to add a point, pick a color, and see the list of points with delete buttons. Implemented generically for any `points` param; the result re-colorizes after each change. The released weights take the hint mask uncentered (0/1); see `tools/export_onnx/zhang.py`.
 - Progress and cancel for long jobs (via worker.py).
-- Model param panels are visibility-toggled groups built at startup (fixed API endpoints `/colorize`, `/rerender`, `/cancel`).
+- Model param panels are visibility-toggled groups built at startup (fixed API endpoints `/colorize`, `/rerender`, `/cancel`). `/colorize` takes `(image, model, device, format, quality, view, *values)` and `/rerender` `(image, model, format, quality, view, *values)`, where `values` = model slots, restore ids, restore slots, postprocess.
 - Gradio telemetry and update checks are disabled (local-first).
 
 ## CLI (cli.py)
 
-`colorizer INPUT OUTPUT [--model ID] [--param k=v ...] [--preset FILE] [--device cpu|cuda|...] [--format png|jpg|tiff]`
+`colorizer INPUT OUTPUT [--model ID] [--param k=v ...] [--preset FILE] [--device cpu|cuda|...] [--format png|jpg|tiff] [--restore ID[,ID...]] [--rparam ID.KEY=VALUE ...]`
+
+- `--restore` sets the chain (in order; overrides the preset's). `--rparam` sets a restorer param or the shared `blend` (`nafnet.blend=0.5`); the id must be in the chain, and a repeated id shares its params. Restorer warnings are logged. `--list-models` lists restorers.
 
 - INPUT can be a file or a directory (recursive with `-r`).
 - Skip existing outputs unless `--overwrite` is given. Exit non-zero if any file failed, and print a summary.
@@ -147,9 +190,9 @@ Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH
 ## Testing
 
 - Unit tests: Param validation, Lab round-trip (L preserved bit-exact within tolerance), postprocess math, registry discovery.
-- A `DummyModel` (returns constant ab) for pipeline and UI tests. No network or weights are needed in default tests.
+- A `DummyModel` (returns constant ab) and a `DummyRestorer` (nearest upscale + offset) for pipeline and UI tests. No network or weights are needed in default tests.
 - Integration tests marked `@pytest.mark.weights`, skipped unless `COLORIZER_TEST_WEIGHTS=1`.
-- Golden test: a tiny fixture image through each real model checks output shape, dtype, and nonzero chroma.
+- Golden test: a tiny fixture image through each real model checks output shape, dtype, and nonzero chroma; each restorer checks shape/range and that the output still resembles the input; CodeFormer must sharpen the face in a real portrait and leave the rest untouched.
 
 ### Test plan
 
@@ -208,7 +251,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestones 1-5 done (2026-10-07). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
+Status: milestones 1-5 done (2026-10-07); restore stage added (2026-10-08). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.
