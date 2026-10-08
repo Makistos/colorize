@@ -139,7 +139,7 @@ Verify weight sources, checkpoints, and licenses before hardcoding them, and rec
 | `deoldify` | jantic/DeOldify (MIT) | `variant` choice [artistic, stable]; `render_factor` int 7–45, default 35 (working size = render_factor × 16) |
 | `sd_controlnet` | SD 1.5 + ControlNet recolor/lineart (optional extra) | `prompt`, `negative_prompt`, `steps` 10–50, `cfg` 1–15, `strength` 0–1, `seed` |
 
-ONNX builds are hosted as assets of the `models-v1` GitHub release (URL + SHA256 in `models/_onnx.py`, `ONNX_SHA256`) and downloaded on first use via `core/weights.py`; a local export in the cache dir (`$COLORIZER_CACHE_DIR`, default `~/.cache/colorizer`) takes precedence. `tools/export_onnx/<model>.py` downloads the SHA256-pinned upstream checkpoint and writes the ONNX into the cache dir. Re-exported ONNX files need a new `models-vN` release and updated hashes; upload the upstream license texts in `packaging/licenses/` with them.
+ONNX builds are hosted as assets of the `models-v1` (colorizers) and `models-v2` (restorers) GitHub releases (SHA256 in `models/_onnx.py`, `ONNX_SHA256`; release per file in `ONNX_RELEASE`) and downloaded on first use via `core/weights.py`; a local export in the cache dir (`$COLORIZER_CACHE_DIR`, default `~/.cache/colorizer`) takes precedence. `tools/export_onnx/<model>.py` downloads the SHA256-pinned upstream checkpoint and writes the ONNX into the cache dir. Re-exported ONNX files need a new `models-vN` release and updated hashes; upload the upstream license texts in `packaging/licenses/` with them.
 
 Implement them in this order: Zhang ECCV16 → DDColor → DeOldify → SIGGRAPH17 hints → SD.
 
@@ -154,7 +154,7 @@ All take the shared `blend` param too. Gray input is replicated to RGB for these
 | `codeformer` | sczhou/CodeFormer (S-Lab License 1.0, **non-commercial**) | `fidelity` float 0–1 (default 0.7); `upscale_bg` bool (default false: same size; true: 2x via Real-ESRGAN) | Faces via OpenCV YuNet (MIT, HF `opencv/face_detection_yunet` pinned), FFHQ 5-point alignment, feathered square paste-back (no face-parsing net), tone-matched like upstream's gray path. `warning` shown in the UI. |
 | `swinir`, `seedvr2` | JingyunLiang/SwinIR, ByteDance-Seed/SeedVR (Apache-2.0) | — | Stubs: registered, `enabled = False`. |
 
-Restorer ONNX files are **not hosted yet**: run their export scripts once (they are not in `ONNX_SHA256`, so the app raises with the export command). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch (NAFNet also checks that a degraded photo improves; on uniform noise it is ill-conditioned even in float64, so its check uses a real photo).
+Restorer ONNX files are hosted in the `models-v2` release (`ONNX_RELEASE` in `models/_onnx.py` maps files to release tags; default `models-v1`). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch (NAFNet also checks that a degraded photo improves; on uniform noise it is ill-conditioned even in float64, so its check uses a real photo).
 
 ## Runtime (runtime.py)
 

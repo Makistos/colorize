@@ -16,7 +16,7 @@ from colorizer.core.runtime import CPU, Device, create_session
 from colorizer.core.weights import WeightFile, cache_dir, ensure
 
 # Prebuilt ONNX files, made by tools/export_onnx/* and published as GitHub release assets.
-ONNX_RELEASE_URL = "https://github.com/Makistos/colorize/releases/download/models-v1/"
+RELEASES_URL = "https://github.com/Makistos/colorize/releases/download/"
 ONNX_SHA256: dict[str, str] = {
     "ddcolor_artistic.onnx": "f426a9cbffa2be0e9d3d7d6925ac513271b6e187296258c73570e9727c8203ad",
     "ddcolor_large.onnx": "73eb1bcf865617354b6b49747d83aff445a1500e1e41a1e9f0183e43ec11507d",
@@ -25,7 +25,25 @@ ONNX_SHA256: dict[str, str] = {
     "deoldify_stable.onnx": "37fc9f524f5a6ad13bc4379e3a929829a13fe1015203dcb10f9bfb9a38377cd1",
     "zhang_eccv16.onnx": "ec93605a9e8d792a2853a78524a05d28b66a6876a6eef5600757e589ded01456",
     "zhang_siggraph17.onnx": "5c959374532e87011e3fcd92964be0d6fdb4e29c2c9cdbfe93688e9b9bf5321a",
+    # Restorers (models-v2).
+    "realesrgan_general_x4v3.onnx": (
+        "da13b66846b4d1ec8b8e38a63c235372e8610caa2995b24adfdf27d302830a8f"
+    ),
+    "nafnet_deblur.onnx": "39d150a0004d96b6bd9b9cdc8d6b39d275c19b54bccd755098f67c6a31bc74b3",
+    "nafnet_denoise.onnx": "4292fbfb7c9a327d5330174e14c7a30cbe14c90e215f88c43da48749aa2cfd0e",
+    "codeformer.onnx": "5312d625adb3d1aef682ac636373f7967c74ba67efaf861f8087d7f5aecffd43",
 }
+# Release tag per file; anything not listed is in models-v1.
+ONNX_RELEASE: dict[str, str] = {
+    "realesrgan_general_x4v3.onnx": "models-v2",
+    "nafnet_deblur.onnx": "models-v2",
+    "nafnet_denoise.onnx": "models-v2",
+    "codeformer.onnx": "models-v2",
+}
+
+
+def onnx_url(filename: str) -> str:
+    return f"{RELEASES_URL}{ONNX_RELEASE.get(filename, 'models-v1')}/{filename}"
 
 
 @dataclass(frozen=True)
@@ -46,7 +64,7 @@ def ensure_onnx(filename: str, export_hint: str) -> Path:
     sha256 = ONNX_SHA256.get(filename)
     if sha256 is None:
         raise FileNotFoundError(f"{path} not found. Export it once with:\n    {export_hint}")
-    return ensure(WeightFile(filename, ONNX_RELEASE_URL + filename, sha256))
+    return ensure(WeightFile(filename, onnx_url(filename), sha256))
 
 
 def resize_L(L: np.ndarray, size: int) -> np.ndarray:

@@ -7,8 +7,7 @@ parameters, and compare the results. Everything runs on your own machine.
   DeOldify (artistic / stable), and optionally Stable Diffusion 1.5 + ControlNet.
 - Optional restoration before colorizing, chainable: Real-ESRGAN (upscale 2x/4x with
   adjustable denoising), NAFNet (deblur or denoise) and CodeFormer (faces; non-commercial
-  license). The restorer models are not hosted yet: export them once from source with
-  `tools/export_onnx/realesrgan.py`, `nafnet.py` and `codeformer.py`.
+  license).
 - Before/after slider, postprocessing (saturation, temperature, tint, chroma blend, ab
   smoothing) without re-running the model, a model comparison tab, presets, and batch
   processing.
@@ -30,7 +29,8 @@ own window.
 
 The models are not bundled. Each one is downloaded the first time you use it (130–900 MB
 per model) from the [`models-v1`](https://github.com/Makistos/colorize/releases/tag/models-v1)
-release, checked against a SHA256 hash pinned in the source, and cached in
+(colorizers) and [`models-v2`](https://github.com/Makistos/colorize/releases/tag/models-v2)
+(restorers) releases, checked against a SHA256 hash pinned in the source, and cached in
 `~/.cache/colorizer` (override with `COLORIZER_CACHE_DIR`). Expect a pause on the first
 run of each model.
 
@@ -70,6 +70,6 @@ The models are by their original authors and keep their own licenses:
 | YuNet face detector (for CodeFormer) | [opencv/opencv_zoo](https://github.com/opencv/opencv_zoo) | MIT |
 | Stable Diffusion 1.5 + brightness ControlNet | [stable-diffusion-v1-5](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5), [latentcat](https://huggingface.co/latentcat/control_v1p_sd15_brightness) | CreativeML OpenRAIL-M |
 
-The ONNX files in the `models-v1` release are conversions of the upstream checkpoints made
+The ONNX files in the `models-v1` and `models-v2` releases are conversions of the upstream checkpoints made
 with the scripts in `tools/export_onnx/`; the weights themselves are unchanged. The upstream
-license texts are in `packaging/licenses/` and attached to that release.
+license texts are in `packaging/licenses/` and attached to those releases.

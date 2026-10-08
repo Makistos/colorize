@@ -28,6 +28,10 @@ a = Analysis(
         "colorizer.models.ddcolor",
         "colorizer.models.deoldify",
         "colorizer.models.zhang",
+        "colorizer.models.realesrgan",
+        "colorizer.models.nafnet",
+        "colorizer.models.codeformer",
+        "colorizer.models.stubs",
     ],
     # Gradio inspects its own source code; keep it as .py files.
     module_collection_mode={"gradio": "py"},

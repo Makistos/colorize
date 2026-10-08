@@ -1,6 +1,6 @@
 [project]
 name = "colorizer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first AI colorization of black-and-white photographs"
 requires-python = ">=3.11"
 license = "MIT"

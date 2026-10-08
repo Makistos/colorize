@@ -62,11 +62,18 @@ def test_realesrgan_rejects_bad_params(esrgan, bad):
     assert session.feeds == []
 
 
-def test_missing_onnx_explains_export(monkeypatch, tmp_path):
+def test_missing_onnx_downloads_from_models_v2(monkeypatch, tmp_path):
     monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
-    with pytest.raises(FileNotFoundError, match=r"tools/export_onnx/realesrgan\.py"):
+    fetched = []
+
+    def fake_ensure(w):
+        fetched.append(w)
+        raise OSError("offline")
+
+    monkeypatch.setattr(_onnx, "ensure", fake_ensure)
+    with pytest.raises(OSError):
         RealESRGAN().load(CPU)
-    assert realesrgan.ONNX not in _onnx.ONNX_SHA256  # not hosted yet
+    assert fetched[0].url.endswith("/models-v2/realesrgan_general_x4v3.onnx")
 
 
 class EchoSession:

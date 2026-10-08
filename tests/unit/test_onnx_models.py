@@ -91,7 +91,8 @@ def test_missing_onnx_downloads_hosted_build(tmp_path, monkeypatch):
     monkeypatch.setattr(_onnx, "ensure", lambda w: fetched.append(w) or tmp_path / w.filename)
     assert _onnx.ensure_onnx("ddcolor_tiny.onnx", "hint") == tmp_path / "ddcolor_tiny.onnx"
     (w,) = fetched
-    assert w.url == _onnx.ONNX_RELEASE_URL + "ddcolor_tiny.onnx"
+    assert w.url == _onnx.RELEASES_URL + "models-v1/ddcolor_tiny.onnx"
+    assert _onnx.onnx_url("codeformer.onnx").endswith("/models-v2/codeformer.onnx")
     assert w.sha256 == _onnx.ONNX_SHA256["ddcolor_tiny.onnx"]
 
 
@@ -103,10 +104,13 @@ def test_local_export_skips_download(tmp_path, monkeypatch):
 
 
 def test_every_onnx_variant_is_hosted():
-    from colorizer.models import zhang
+    from colorizer.models import codeformer, nafnet, realesrgan, zhang
 
     names = {v.onnx for cls in (DDColor, DeOldify) for v in cls.variants.values()}
-    assert names | {zhang.ECCV16_ONNX, zhang.SIGGRAPH17_ONNX} == set(_onnx.ONNX_SHA256)
+    names |= {zhang.ECCV16_ONNX, zhang.SIGGRAPH17_ONNX, realesrgan.ONNX, codeformer.ONNX}
+    names |= {v.onnx for v in nafnet.VARIANTS.values()}
+    assert names == set(_onnx.ONNX_SHA256)
+    assert set(_onnx.ONNX_RELEASE) <= names
 
 
 def test_sessions_created_per_variant_on_demand(tmp_path, monkeypatch, L):
