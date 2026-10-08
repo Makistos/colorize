@@ -30,6 +30,9 @@ jobs:
           if [ ! -f ~/.cache/colorizer/ddcolor_large.onnx ]; then
             uv run --locked --extra cpu --group export python tools/export_onnx/ddcolor.py
           fi
+          if [ ! -f ~/.cache/colorizer/realesrgan_general_x4v3.onnx ]; then
+            uv run --locked --extra cpu --group export python tools/export_onnx/realesrgan.py
+          fi
           # The exported ONNX files are what the tests need; drop the checkpoints so the
           # cache stays well under the 10 GB per-repo limit.
           rm -f ~/.cache/colorizer/*.pth ~/.cache/colorizer/*.bin

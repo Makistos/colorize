@@ -46,3 +46,24 @@ def check_golden(registry, model_id, params):
     chroma = np.hypot(ab[..., 0], ab[..., 1])
     # A broken model gives ~0 everywhere; real ones colour at least some regions clearly.
     assert np.percentile(chroma, 90) > 3.0, "model produced (near) grayscale output"
+
+
+RESTORERS = {"realesrgan": ({"scale": 2, "tile": 32}, 2)}
+
+
+@pytest.mark.parametrize("restorer_id", list(RESTORERS))
+def test_golden_restorer(registry, restorer_id):
+    import cv2
+
+    from colorizer.core.pipeline import L_to_gray
+    from colorizer.core.restore import run_restorer
+
+    params, scale = RESTORERS[restorer_id]
+    restorer = registry.restorers.get(restorer_id, CPU)
+    gray = L_to_gray(load_image(FIXTURE).L)
+    out = run_restorer(restorer, gray, params)
+    assert out.dtype == np.float32 and out.shape == (64 * scale, 96 * scale)
+    assert np.isfinite(out).all() and out.min() >= 0.0 and out.max() <= 1.0
+    # Restored, not replaced: still closely resembles the input.
+    up = cv2.resize(gray, out.shape[::-1], interpolation=cv2.INTER_CUBIC)
+    assert np.corrcoef(up.ravel(), out.ravel())[0, 1] > 0.9

@@ -27,7 +27,9 @@ BUILTIN_MODELS: dict[str, str] = {
     "deoldify": "colorizer.models.deoldify:DeOldify",
     "sd_controlnet": "colorizer.models.sd_controlnet:SDControlNet",
 }
-BUILTIN_RESTORERS: dict[str, str] = {}
+BUILTIN_RESTORERS: dict[str, str] = {
+    "realesrgan": "colorizer.models.realesrgan:RealESRGAN",
+}
 
 P = TypeVar("P", bound=Plugin)
 
