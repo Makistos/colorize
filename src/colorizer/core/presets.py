@@ -1,4 +1,4 @@
-"""Named presets: ``{model, params, postprocess}`` JSON files in the config directory."""
+"""Named presets: ``{model, params, postprocess, restore}`` JSON files in the config dir."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any
 
 from colorizer.core.postprocess import Postprocess
 from colorizer.core.registry import Registry
+from colorizer.core.restore import RestoreStep, validate_restore_params
 
 _NAME = re.compile(r"^[\w][\w .()+-]{0,79}$")
 
@@ -31,6 +32,7 @@ class Preset:
     model: str
     params: dict[str, Any] = field(default_factory=dict)
     postprocess: dict[str, Any] = field(default_factory=dict)
+    restore: tuple[RestoreStep, ...] = ()  # optional; absent in older presets
 
     @classmethod
     def from_mapping(cls, data: Any) -> Preset:
@@ -46,19 +48,45 @@ class Preset:
             raise ValueError("preset needs a 'model' string")
         if not isinstance(params, Mapping) or not isinstance(post, Mapping):
             raise ValueError("preset 'params' and 'postprocess' must be objects")
-        return cls(model, dict(params), dict(post))
+        steps = data.get("restore")
+        steps = [] if steps is None else steps
+        if not isinstance(steps, list):
+            raise ValueError("preset 'restore' must be a list of {id, params}")
+        restore = []
+        for step in steps:
+            if not isinstance(step, Mapping) or not isinstance(step.get("id"), str):
+                raise ValueError(f"bad restore step {step!r}; expected {{id, params}}")
+            step_params = step.get("params") or {}
+            if not isinstance(step_params, Mapping):
+                raise ValueError(f"restore step {step['id']!r}: 'params' must be an object")
+            restore.append(RestoreStep(step["id"], dict(step_params)))
+        return cls(model, dict(params), dict(post), tuple(restore))
 
     def validate(self, registry: Registry) -> Preset:
         """Return a copy with all values validated and defaults filled; raises ``ValueError``."""
         model_cls = registry.get_class(self.model)
+        restore = tuple(
+            RestoreStep(
+                step.id,
+                validate_restore_params(registry.restorers.get_class(step.id), step.params),
+            )
+            for step in self.restore
+        )
         return Preset(
             self.model,
             model_cls.validate_params(self.params),
             Postprocess.from_mapping(self.postprocess).to_dict(),
+            restore,
         )
 
     def to_json(self) -> str:
-        data = {"model": self.model, "params": self.params, "postprocess": self.postprocess}
+        data: dict[str, Any] = {
+            "model": self.model,
+            "params": self.params,
+            "postprocess": self.postprocess,
+        }
+        if self.restore:
+            data["restore"] = [{"id": s.id, "params": dict(s.params)} for s in self.restore]
         return json.dumps(data, indent=2, sort_keys=False) + "\n"
 
 

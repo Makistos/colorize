@@ -50,3 +50,22 @@ def test_bad_values_and_missing(tmp_path, registry):
 def test_config_dir_honours_xdg(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     assert presets.presets_dir() == tmp_path / "colorizer" / "presets"
+
+
+def test_restore_chain_round_trip_and_validation(registry, tmp_path):
+    from colorizer.core.presets import Preset, load_preset, save_preset
+    from colorizer.core.restore import RestoreStep
+
+    preset = Preset("dummy", restore=(RestoreStep("dummy_restore", {"scale": 2}),))
+    save_preset("r", preset, tmp_path)
+    loaded = load_preset("r", tmp_path)
+    assert loaded.restore == (RestoreStep("dummy_restore", {"scale": 2}),)
+    validated = loaded.validate(registry)
+    assert validated.restore[0].params == {"scale": 2, "offset": 0.0, "blend": 1.0}
+    assert load_preset("r", tmp_path).to_json() == preset.to_json()
+    assert '"restore"' not in Preset("dummy").to_json()  # older presets stay unchanged
+    for bad in ({"model": "dummy", "restore": {}}, {"model": "dummy", "restore": [{"x": 1}]}):
+        with pytest.raises(ValueError):
+            Preset.from_mapping(bad)
+    with pytest.raises(ValueError):
+        Preset("dummy", restore=(RestoreStep("dummy_restore", {"scale": 9}),)).validate(registry)

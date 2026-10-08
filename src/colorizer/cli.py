@@ -1,6 +1,7 @@
 """Batch command-line interface.
 
 colorizer INPUT OUTPUT [--model ID] [--param k=v ...] [--preset FILE] [--device NAME]
+          [--restore ID[,ID...]] [--rparam ID.KEY=VALUE ...]
           [--format png|jpg|tiff] [-r] [--overwrite]
 """
 
@@ -20,6 +21,7 @@ from colorizer.core.pipeline import EXTENSIONS, INPUT_SUFFIXES, SUFFIX_FORMATS, 
 from colorizer.core.postprocess import POSTPROCESS_PARAMS, Postprocess
 from colorizer.core.presets import load_preset
 from colorizer.core.registry import Registry, default_registry
+from colorizer.core.restore import RESTORE_PARAMS, RestoreStep, validate_restore_params
 from colorizer.core.runtime import select_device
 
 log = logging.getLogger("colorizer")
@@ -32,6 +34,7 @@ class Settings:
     model: str
     params: dict[str, Any] = field(default_factory=dict)
     post: Postprocess = field(default_factory=Postprocess)
+    restore: list[RestoreStep] = field(default_factory=list)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,12 +52,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--preset", help="preset name (from the UI) or JSON file {model, params, postprocess}"
     )
+    p.add_argument(
+        "--restore",
+        metavar="ID[,ID...]",
+        help="restorers to run before colorizing, in order (overrides the preset's)",
+    )
+    p.add_argument(
+        "--rparam",
+        action="append",
+        default=[],
+        metavar="ID.KEY=V",
+        help="restorer parameter, e.g. realesrgan.scale=4 or nafnet.blend=0.5; repeatable",
+    )
     p.add_argument("--device", help="auto, cpu, cuda, rocm, directml, coreml")
     p.add_argument("--format", choices=list(EXTENSIONS), help="output format")
     p.add_argument("--quality", type=int, default=95, help="JPEG quality (default 95)")
     p.add_argument("-r", "--recursive", action="store_true", help="recurse into directories")
     p.add_argument("--overwrite", action="store_true", help="replace existing outputs")
-    p.add_argument("--list-models", action="store_true", help="list models and their params")
+    p.add_argument(
+        "--list-models", action="store_true", help="list models, restorers and their params"
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -93,8 +110,39 @@ def resolve_settings(args: argparse.Namespace, registry: Registry) -> Settings:
     params.update(parse_params(model_cls.params, model_pairs))
     post_values.update(parse_params(POSTPROCESS_PARAMS, post_pairs))
     return Settings(
-        model_id, model_cls.validate_params(params), Postprocess.from_mapping(post_values)
+        model_id,
+        model_cls.validate_params(params),
+        Postprocess.from_mapping(post_values),
+        resolve_restore(args, registry, preset.restore if preset else ()),
     )
+
+
+def resolve_restore(
+    args: argparse.Namespace, registry: Registry, preset_steps: Sequence[RestoreStep]
+) -> list[RestoreStep]:
+    """The restore chain from ``--restore``/``--rparam`` (or the preset), validated."""
+    if args.restore is not None:
+        ids = [i.strip() for i in args.restore.split(",") if i.strip()]
+        steps = [RestoreStep(i, {}) for i in ids]
+    else:
+        steps = [RestoreStep(s.id, dict(s.params)) for s in preset_steps]
+    values: dict[str, dict[str, Any]] = {s.id: dict(s.params) for s in steps}
+    for item in args.rparam:
+        target, sep, value = item.partition("=")
+        rid, dot, key = target.strip().partition(".")
+        if not sep or not dot or not rid or not key:
+            raise ValueError(f"--rparam expects ID.KEY=V, got {item!r}")
+        if rid not in values:
+            raise ValueError(
+                f"--rparam {item!r}: {rid!r} is not in the restore chain {list(values)}"
+            )
+        schema = (*registry.restorers.get_class(rid).params, *RESTORE_PARAMS)
+        values[rid].update(parse_params(schema, {key: value}))
+    # Same id twice in a chain shares its params.
+    return [
+        RestoreStep(s.id, validate_restore_params(registry.restorers.get_class(s.id), values[s.id]))
+        for s in steps
+    ]
 
 
 def plan_jobs(
@@ -131,6 +179,16 @@ def list_models(registry: Registry) -> None:
     log.info("postprocess (all models):")
     for p in POSTPROCESS_PARAMS:
         log.info("    %s: %s = %r  [%s, %s]", p.name, p.kind, p.default, p.min, p.max)
+    log.info("restorers (--restore ID[,ID...], --rparam ID.KEY=V):")
+    for restorer_id in registry.restorers.ids():
+        rcls = registry.restorers.get_class(restorer_id)
+        state = "" if rcls.enabled else "  [not implemented yet]"
+        log.info("%s  (%s, %s)%s", restorer_id, rcls.display_name, rcls.license, state)
+        for p in rcls.params:
+            log.info("    %s: %s = %r  %s", p.name, p.kind, p.default, p.help)
+    log.info("restore params (all restorers):")
+    for p in RESTORE_PARAMS:
+        log.info("    %s: %s = %r  %s", p.name, p.kind, p.default, p.help)
 
 
 def main(argv: Sequence[str] | None = None, registry: Registry | None = None) -> int:
@@ -157,6 +215,10 @@ def main(argv: Sequence[str] | None = None, registry: Registry | None = None) ->
         log.error("error: no images found in %s", args.input)
         return 1
 
+    for step in settings.restore:
+        warning = registry.restorers.get_class(step.id).warning
+        if warning:
+            log.warning("warning: %s", warning)
     items = [BatchItem(src, dst, fmt) for src, dst, fmt in jobs]
     try:
         result = run_batch(
@@ -166,9 +228,12 @@ def main(argv: Sequence[str] | None = None, registry: Registry | None = None) ->
             settings.post,
             quality=args.quality,
             overwrite=args.overwrite,
+            restore=settings.restore,
+            get_restorer=lambda rid: registry.restorers.get(rid, device),
         )
-    except Exception as e:  # per-file errors are collected; this is a model load failure
-        log.error("error: cannot load %s: %s", settings.model, e)
+    except Exception as e:  # per-file errors are collected; this is a load failure
+        what = ", ".join([settings.model, *(s.id for s in settings.restore)])
+        log.error("error: cannot load %s: %s", what, e)
         return 1
     log.info("%s", result.summary())
     for item, _ in result.failed:

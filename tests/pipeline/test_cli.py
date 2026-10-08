@@ -117,3 +117,58 @@ def test_missing_input(registry, tmp_path):
 def test_list_models(caplog):
     assert cli.main(["--list-models"]) == 0
     assert "zhang_eccv16" in caplog.text and "saturation" in caplog.text
+
+
+def test_restore_chain_and_rparams(registry, images, tmp_path):
+    from tests.conftest import DummyRestorer
+
+    out = tmp_path / "x.png"
+    args = ["--restore", "dummy_restore", "--rparam", "dummy_restore.scale=2"]
+    assert run(registry, str(images / "b.png"), str(out), *args) == 0
+    assert Image.open(out).size == (100, 40)  # 50x20 input, upscaled 2x
+    assert DummyRestorer.instances[0].calls == [{"scale": 2, "offset": 0.0}]
+
+
+def test_rparam_shared_blend_and_errors(registry, images, tmp_path):
+    parser = cli.build_parser()
+
+    def settings(*extra):
+        args = parser.parse_args(["in", "out", "--model", "dummy", *extra])
+        return cli.resolve_settings(args, registry)
+
+    s = settings("--restore", "dummy_restore", "--rparam", "dummy_restore.blend=0.25")
+    assert s.restore[0].params == {"scale": 1, "offset": 0.0, "blend": 0.25}
+    assert settings().restore == []
+    bad = [
+        ["--restore", "nope"],
+        ["--restore", "dummy_restore", "--rparam", "dummy_restore.scale=9"],
+        ["--restore", "dummy_restore", "--rparam", "dummy_restore.nope=1"],
+        ["--restore", "dummy_restore", "--rparam", "scale=2"],
+        ["--rparam", "dummy_restore.scale=2"],  # not in the chain
+    ]
+    for extra in bad:
+        with pytest.raises(ValueError):
+            settings(*extra)
+    # Exit code 2 and nothing written on a bad --rparam.
+    rc = run(registry, str(images / "b.png"), str(tmp_path / "y.png"), *bad[1])
+    assert rc == 2 and not (tmp_path / "y.png").exists()
+
+
+def test_preset_restore_chain(registry, images, tmp_path):
+    preset = tmp_path / "p.json"
+    preset.write_text(
+        json.dumps(
+            {
+                "model": "dummy",
+                "restore": [{"id": "dummy_restore", "params": {"scale": 2}}],
+            }
+        )
+    )
+    out = tmp_path / "x.png"
+    assert run(registry, str(images / "b.png"), str(out), "--preset", str(preset)) == 0
+    assert Image.open(out).size == (100, 40)
+    # --restore overrides the preset's chain.
+    out2 = tmp_path / "y.png"
+    args = ["--preset", str(preset), "--restore", ""]
+    assert run(registry, str(images / "b.png"), str(out2), *args) == 0
+    assert Image.open(out2).size == (50, 20)
