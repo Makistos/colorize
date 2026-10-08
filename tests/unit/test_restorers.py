@@ -67,3 +67,42 @@ def test_missing_onnx_explains_export(monkeypatch, tmp_path):
     with pytest.raises(FileNotFoundError, match=r"tools/export_onnx/realesrgan\.py"):
         RealESRGAN().load(CPU)
     assert realesrgan.ONNX not in _onnx.ONNX_SHA256  # not hosted yet
+
+
+class EchoSession:
+    """Identity network that records input shapes (NAFNet keeps the size)."""
+
+    def __init__(self):
+        self.shapes = []
+
+    def run(self, _, feeds):
+        x = feeds["image"]
+        self.shapes.append(x.shape)
+        return [x * 0.5]
+
+
+def test_nafnet_pads_to_multiple_of_16_and_tiles(monkeypatch, tmp_path):
+    from colorizer.models import nafnet
+
+    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
+    for v in nafnet.VARIANTS.values():
+        (tmp_path / v.onnx).touch()
+    sessions = {}
+
+    def fake_create(path, device):
+        sessions[path.name] = EchoSession()
+        return sessions[path.name], device
+
+    monkeypatch.setattr(nafnet, "create_session", fake_create)
+    model = nafnet.NAFNet()
+    model.load(CPU)
+    gray = np.random.default_rng(2).uniform(0, 1, (500, 403)).astype(np.float32)
+    out = run_restorer(model, gray, {"variant": "deblur"})
+    assert out.shape == gray.shape and np.allclose(out, gray * 0.5)
+    shapes = sessions["nafnet_deblur.onnx"].shapes
+    assert len(shapes) > 1  # tiled
+    assert all(s[2] % 16 == 0 and s[3] % 16 == 0 and s[1] == 3 for s in shapes)
+    run_restorer(model, gray, {"variant": "denoise"})
+    assert set(sessions) == {"nafnet_deblur.onnx", "nafnet_denoise.onnx"}
+    with pytest.raises(ValueError):
+        run_restorer(model, gray, {"variant": "sharpen"})

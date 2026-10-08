@@ -29,6 +29,7 @@ BUILTIN_MODELS: dict[str, str] = {
 }
 BUILTIN_RESTORERS: dict[str, str] = {
     "realesrgan": "colorizer.models.realesrgan:RealESRGAN",
+    "nafnet": "colorizer.models.nafnet:NAFNet",
 }
 
 P = TypeVar("P", bound=Plugin)
