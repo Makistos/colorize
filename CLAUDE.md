@@ -1,6 +1,6 @@
 # Colorizer — Project Spec for Claude Code
 
-AI colorization of black-and-white photographs, with optional restoration (denoise, deblur, upscale, faces) before colorizing. Local-first, cross-platform (Linux primary; Windows/macOS should work). Multiple selectable models, each with editable parameters.
+AI colorization of black-and-white photographs, with optional restoration (scratches, grain, upscale, faces) before colorizing. The tool is first and foremost for old photos: pick models trained on mixed real-world degradations, not single clean ones. Local-first, cross-platform (Linux primary; Windows/macOS should work). Multiple selectable models, each with editable parameters.
 
 ## Stack
 
@@ -23,8 +23,10 @@ uv run --group export python tools/export_onnx/zhang.py   # ECCV16 + SIGGRAPH17 
 uv run --group export python tools/export_onnx/deoldify.py   # DeOldify, rebuilt without fastai
 uv run --group export python tools/export_onnx/ddcolor.py    # DDColor, uses upstream code at a pinned commit
 uv run --group export python tools/export_onnx/realesrgan.py # restorers: re-implemented archs, no upstream code run
+uv run --group export python tools/export_onnx/descratch.py  # extracts the detector from Microsoft's 2 GB zip via HTTP ranges
+uv run --group export python tools/export_onnx/scunet.py
 uv run --group export python tools/export_onnx/codeformer.py
-uv run colorizer in/ out/ --restore realesrgan,codeformer --rparam realesrgan.scale=4 --rparam codeformer.blend=0.7
+uv run colorizer in/ out/ --restore descratch,scunet,realesrgan,codeformer --rparam realesrgan.scale=4 --rparam codeformer.blend=0.7
 uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
 ```
 
@@ -50,7 +52,9 @@ src/colorizer/
     ddcolor.py
     deoldify.py
     sd_controlnet.py   # optional extra: `uv sync --extra diffusion`
-    realesrgan.py  # restorers…
+    descratch.py   # restorers…
+    scunet.py
+    realesrgan.py
     codeformer.py
     stubs.py       # swinir, seedvr2: registered, enabled = False
     _onnx.py, _tiles.py  # shared ONNX download/session plumbing, tiled inference
@@ -148,10 +152,12 @@ All take the shared `blend` param too. Gray input is replicated to RGB for these
 | id | Source (license) | Params | Notes |
 |---|---|---|---|
 | `realesrgan` | xinntao/Real-ESRGAN `realesr-general-x4v3` (BSD-3) | `scale` int 2\|4 (default 2); `tile` int 0–2048 step 32 (0 = off, default 512); `denoise_strength` float 0–1 (default 0.5) | Denoise = upstream DNI between the general and `wdn` weights, done inside the ONNX graph (`denoise` input): ORT ignores initializer overrides for prepacked weights at the default optimization level. Scale 2 = x4 then Lanczos down (upstream `--outscale`). |
+| `descratch` | microsoft/Bringing-Old-Photos-Back-to-Life scratch-detection UNet (MIT) | `sensitivity` float 0–1 (default 0.6 = upstream threshold 0.4); `detail` choice [normal (256 px, upstream), fine (512 px)]; `grow` int 0–10 (default 2) | Detection on gray at the working size, mask upscaled, OpenCV Telea inpainting (upstream fills with its big restoration nets). Finds light damage reliably (100% of thin light lines) but **not dark scratches/dust**; a classical black-hat detector for those was tried and dropped (too many false positives). Checkpoint only exists inside the official 2 GB `global_checkpoints.zip`; the export script range-extracts that member and checks its SHA256. |
+| `scunet` | cszn/SCUNet `scunet_color_real_{psnr,gan}` (Apache-2.0) | `variant` choice [psnr, gan] (default psnr) | Blind real-image denoising (trained on mixed noise/blur/JPEG); replaced NAFNet (GoPro/SIDD models diverged on film grain). 256 px tiles + 32 px context, all padded to one 320 px shape: ORT memory grows ~11 KB/px with tile area and stays flat (~2.5 GB) only at a fixed input shape. ~70 s per 3 MP on CPU. No divergence in a grain/JPEG sweep; slightly smooths perfectly clean input (use `blend`). |
 | `codeformer` | sczhou/CodeFormer (S-Lab License 1.0, **non-commercial**) | `fidelity` float 0–1 (default 0.7); `upscale_bg` bool (default false: same size; true: 2x via Real-ESRGAN) | Faces via OpenCV YuNet (MIT, HF `opencv/face_detection_yunet` pinned), FFHQ 5-point alignment, feathered square paste-back (no face-parsing net), tone-matched like upstream's gray path. `warning` shown in the UI. |
 | `swinir`, `seedvr2` | JingyunLiang/SwinIR, ByteDance-Seed/SeedVR (Apache-2.0) | — | Stubs: registered, `enabled = False`. |
 
-Restorer ONNX files are hosted in the `models-v2` release (`ONNX_RELEASE` in `models/_onnx.py` maps files to release tags; default `models-v1`). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch.
+Restorer ONNX files are hosted in the `models-v2` and `models-v3` releases (`ONNX_RELEASE` in `models/_onnx.py` maps files to release tags; default `models-v1`). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch.
 
 ## Runtime (runtime.py)
 
@@ -248,7 +254,7 @@ Test layers, from fastest to slowest. Each layer has its own pytest marker so CI
 
 ## Milestones (acceptance criteria)
 
-Status: milestones 1-5 done (2026-10-07); restore stage added (2026-10-08). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
+Status: milestones 1-5 done (2026-10-07); restore stage added (2026-10-08); 0.3.0: NAFNet replaced by SCUNet, scratch removal added (2026-10-10). Cancellation is cooperative between pipeline steps; a running ONNX inference call is not interrupted.
 
 1. **Core + Zhang ECCV16 on CPU**: the CLI colorizes a JPEG end to end and tests pass.
 2. **Gradio UI**: model params are auto-generated, the before/after view works, and postprocess changes don't re-run inference.

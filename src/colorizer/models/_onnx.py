@@ -30,11 +30,18 @@ ONNX_SHA256: dict[str, str] = {
         "da13b66846b4d1ec8b8e38a63c235372e8610caa2995b24adfdf27d302830a8f"
     ),
     "codeformer.onnx": "5312d625adb3d1aef682ac636373f7967c74ba67efaf861f8087d7f5aecffd43",
+    # Restorers (models-v3).
+    "scunet_real_psnr.onnx": "0751e86b6119d6d6ace7f6cafabfdd709a4409e1383d1110ebb475050ae3d838",
+    "scunet_real_gan.onnx": "aded722035a8b80799bea697b0fa42c6ae87cf35af185a29ccae52c127248c8b",
+    "scratch_detection.onnx": "b24d6a9063ed40f259a1a215e686a1679d641d4e70131db22e4dd8cf57f5d61c",
 }
 # Release tag per file; anything not listed is in models-v1.
 ONNX_RELEASE: dict[str, str] = {
     "realesrgan_general_x4v3.onnx": "models-v2",
     "codeformer.onnx": "models-v2",
+    "scunet_real_psnr.onnx": "models-v3",
+    "scunet_real_gan.onnx": "models-v3",
+    "scratch_detection.onnx": "models-v3",
 }
 
 

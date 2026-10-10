@@ -104,10 +104,11 @@ def test_local_export_skips_download(tmp_path, monkeypatch):
 
 
 def test_every_onnx_variant_is_hosted():
-    from colorizer.models import codeformer, realesrgan, zhang
+    from colorizer.models import codeformer, descratch, realesrgan, scunet, zhang
 
     names = {v.onnx for cls in (DDColor, DeOldify) for v in cls.variants.values()}
     names |= {zhang.ECCV16_ONNX, zhang.SIGGRAPH17_ONNX, realesrgan.ONNX, codeformer.ONNX}
+    names |= {descratch.ONNX, *scunet.ONNX.values()}
     assert names == set(_onnx.ONNX_SHA256)
     assert set(_onnx.ONNX_RELEASE) <= names
 
