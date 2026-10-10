@@ -50,6 +50,8 @@ def check_golden(registry, model_id, params):
 
 RESTORERS = {
     "realesrgan": ({"scale": 2, "tile": 32}, 2),
+    "descratch": ({}, 1),
+    "descratch-fine": ({"detail": "fine", "grow": 0}, 1),
     "scunet": ({"variant": "psnr"}, 1),
     "scunet-gan": ({"variant": "gan"}, 1),
     "codeformer": ({"fidelity": 0.7}, 1),
@@ -110,3 +112,22 @@ def test_scunet_removes_grain(registry, variant):
     grainy = cv2.imdecode(enc, 0).astype(np.float32) / 255
     out = run_restorer(restorer, grainy, {"variant": variant})
     assert np.mean((out - clean) ** 2) < 0.5 * np.mean((grainy - clean) ** 2)
+
+
+def test_descratch_removes_scratches(registry):
+    """Thin light scratches drawn on a real photo are found and filled in."""
+    import cv2
+    from skimage import data
+
+    from colorizer.core.restore import run_restorer
+
+    restorer = registry.restorers.get("descratch", CPU)
+    clean = data.camera()[:384, :448].copy()
+    damaged = clean.copy()
+    # Light damage (the detector's domain; it does not find dark scratches).
+    for (x0, y0, x1, y1), value in (((10, 20, 430, 300), 245), ((300, 10, 80, 370), 225)):
+        cv2.line(damaged, (x0, y0), (x1, y1), value, 2)
+    clean_f, damaged_f = clean.astype(np.float32) / 255, damaged.astype(np.float32) / 255
+    out = run_restorer(restorer, damaged_f, {})
+    before, after = np.mean((damaged_f - clean_f) ** 2), np.mean((out - clean_f) ** 2)
+    assert after < 0.3 * before, (before, after)

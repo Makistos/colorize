@@ -379,7 +379,7 @@ def test_every_registered_restorer_gets_widgets():
 
     app = App(registry=Registry())
     try:
-        assert set(app.restorers) == {"realesrgan", "scunet", "codeformer"}
+        assert set(app.restorers) == {"descratch", "realesrgan", "scunet", "codeformer"}
         for rid, rcls in app.restorers.items():
             names = [s.param.name for s in app.rslots if s.model_id == rid]
             assert names == [p.name for p in (*rcls.params, *RESTORE_PARAMS)]

@@ -28,6 +28,8 @@ BUILTIN_MODELS: dict[str, str] = {
     "sd_controlnet": "colorizer.models.sd_controlnet:SDControlNet",
 }
 BUILTIN_RESTORERS: dict[str, str] = {
+    # Listed in the order they usually work best in a chain.
+    "descratch": "colorizer.models.descratch:Descratch",
     "realesrgan": "colorizer.models.realesrgan:RealESRGAN",
     "scunet": "colorizer.models.scunet:SCUNet",
     "codeformer": "colorizer.models.codeformer:CodeFormer",

@@ -149,3 +149,57 @@ def test_scunet_runs_every_tile_at_one_shape(monkeypatch, tmp_path):
     assert sessions["scunet_real_gan.onnx"].shapes == [(1, 3, 320, 320)]
     with pytest.raises(ValueError):
         run_restorer(model, gray, {"variant": "sharp"})
+
+
+class FakeDetector:
+    """Detection 'network': marks very dark pixels (below -0.8 in [-1, 1] input) as damage."""
+
+    def __init__(self):
+        self.shapes = []
+
+    def run(self, _, feeds):
+        x = feeds["gray"]
+        self.shapes.append(x.shape)
+        return [np.where(x < -0.8, 10.0, -10.0).astype(np.float32)]
+
+
+@pytest.fixture
+def descratch(monkeypatch, tmp_path):
+    from colorizer.models import descratch
+
+    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
+    (tmp_path / descratch.ONNX).touch()
+    detector = FakeDetector()
+    monkeypatch.setattr(descratch, "create_session", lambda path, device: (detector, device))
+    model = descratch.Descratch()
+    model.load(CPU)
+    return model, detector
+
+
+def test_descratch_fills_detected_damage(descratch):
+    model, detector = descratch
+    gray = np.full((300, 520), 0.6, np.float32)
+    gray[150:153, 40:480] = 0.0  # a dark scratch
+    out = run_restorer(model, gray, {"grow": 1})
+    assert out.shape == gray.shape and out.dtype == np.float32
+    assert abs(out[151, 260] - 0.6) < 0.02  # filled from the surroundings
+    assert np.allclose(out[:100], 0.6, atol=1e-4)  # undamaged area untouched
+    (shape,) = detector.shapes
+    assert min(shape[2:]) == 256 and shape[2] % 16 == 0 and shape[3] % 16 == 0
+    run_restorer(model, gray, {"detail": "fine"})
+    assert min(detector.shapes[-1][2:]) == 512
+
+
+def test_descratch_without_damage_is_identity(descratch):
+    model, _ = descratch
+    gray = np.random.default_rng(4).uniform(0.3, 0.9, (64, 80)).astype(np.float32)
+    assert np.array_equal(run_restorer(model, gray, {}), gray)
+    assert np.array_equal(run_restorer(model, gray * 0 + 0.0, {"sensitivity": 0.0}), gray * 0)
+
+
+@pytest.mark.parametrize("bad", [{"sensitivity": 1.5}, {"grow": 11}, {"detail": "max"}])
+def test_descratch_rejects_bad_params(descratch, bad):
+    model, detector = descratch
+    with pytest.raises(ValueError):
+        run_restorer(model, np.zeros((32, 32), np.float32), bad)
+    assert detector.shapes == []
