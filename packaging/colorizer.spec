@@ -29,6 +29,7 @@ a = Analysis(
         "colorizer.models.deoldify",
         "colorizer.models.zhang",
         "colorizer.models.realesrgan",
+        "colorizer.models.scunet",
         "colorizer.models.codeformer",
         "colorizer.models.stubs",
     ],

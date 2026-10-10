@@ -123,3 +123,29 @@ def test_codeformer_declares_noncommercial_warning():
 
     assert "non-commercial" in CodeFormer.warning
     assert {p.name: p.default for p in CodeFormer.params} == {"fidelity": 0.7, "upscale_bg": False}
+
+
+def test_scunet_runs_every_tile_at_one_shape(monkeypatch, tmp_path):
+    from colorizer.models import scunet
+
+    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
+    for name in scunet.ONNX.values():
+        (tmp_path / name).touch()
+    sessions = {}
+
+    def fake_create(path, device):
+        sessions[path.name] = EchoSession()
+        return sessions[path.name], device
+
+    monkeypatch.setattr(scunet, "create_session", fake_create)
+    model = scunet.SCUNet()
+    model.load(CPU)
+    gray = np.random.default_rng(2).uniform(0, 1, (700, 333)).astype(np.float32)
+    out = run_restorer(model, gray, {"variant": "psnr"})
+    assert out.shape == gray.shape and np.allclose(out, gray * 0.5)
+    shapes = set(sessions["scunet_real_psnr.onnx"].shapes)
+    assert shapes == {(1, 3, scunet.RUN_SIZE, scunet.RUN_SIZE)}  # constant memory
+    run_restorer(model, np.zeros((40, 50), np.float32), {"variant": "gan"})
+    assert sessions["scunet_real_gan.onnx"].shapes == [(1, 3, 320, 320)]
+    with pytest.raises(ValueError):
+        run_restorer(model, gray, {"variant": "sharp"})

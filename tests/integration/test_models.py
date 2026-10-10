@@ -50,6 +50,8 @@ def check_golden(registry, model_id, params):
 
 RESTORERS = {
     "realesrgan": ({"scale": 2, "tile": 32}, 2),
+    "scunet": ({"variant": "psnr"}, 1),
+    "scunet-gan": ({"variant": "gan"}, 1),
     "codeformer": ({"fidelity": 0.7}, 1),
     "codeformer-bg": ({"upscale_bg": True}, 2),
 }
@@ -89,3 +91,22 @@ def test_codeformer_restores_a_face(registry):
 
     assert sharpness(out) > 1.5 * sharpness(blurred)
     assert np.allclose(out[400:], blurred[400:], atol=1e-6)
+
+
+@pytest.mark.parametrize("variant", ["psnr", "gan"])
+def test_scunet_removes_grain(registry, variant):
+    import cv2
+    from skimage import data
+
+    from colorizer.core.restore import run_restorer
+
+    restorer = registry.restorers.get("scunet", CPU)
+    clean = data.camera()[:384, :448].astype(np.float32) / 255
+    grain = np.random.default_rng(0).normal(0, 0.06, clean.shape)
+    grainy = np.clip(clean + grain, 0, 1).astype(np.float32)
+    _, enc = cv2.imencode(
+        ".jpg", np.round(grainy * 255).astype(np.uint8), [cv2.IMWRITE_JPEG_QUALITY, 70]
+    )
+    grainy = cv2.imdecode(enc, 0).astype(np.float32) / 255
+    out = run_restorer(restorer, grainy, {"variant": variant})
+    assert np.mean((out - clean) ** 2) < 0.5 * np.mean((grainy - clean) ** 2)

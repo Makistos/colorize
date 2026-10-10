@@ -29,6 +29,7 @@ BUILTIN_MODELS: dict[str, str] = {
 }
 BUILTIN_RESTORERS: dict[str, str] = {
     "realesrgan": "colorizer.models.realesrgan:RealESRGAN",
+    "scunet": "colorizer.models.scunet:SCUNet",
     "codeformer": "colorizer.models.codeformer:CodeFormer",
     # Registered but disabled (enabled = False) until implemented.
     "swinir": "colorizer.models.stubs:SwinIR",
