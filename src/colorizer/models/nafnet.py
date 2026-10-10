@@ -8,10 +8,16 @@ originals (same SHA256). ONNX files are produced by ``tools/export_onnx/nafnet.p
 
 Inference runs in 384 px tiles. Besides bounding memory, this matches how upstream
 evaluates the GoPro model (NAFNetLocal pools over 384 px windows, 1.5x the training crops).
+
+On inputs unlike their training data (film grain for the GoPro model, synthetic or scan
+noise for SIDD) the networks can diverge: outputs far outside [0, 1] that look like a grid
+pattern. This is upstream behaviour (OpenCV's independent ONNX conversion does the same).
+A diverged tile makes the restorer return its input unchanged, with a warning.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +39,14 @@ _MIRROR = (
 EXPORT_HINT = "uv run --group export python tools/export_onnx/nafnet.py"
 TILE, TILE_PAD = 384, 32
 MULTIPLE = 16  # the network downsamples 4 times
+# Healthy outputs stay within ~[-0.05, 1.05]; diverged ones reach +-50 or more.
+DIVERGED_BELOW, DIVERGED_ABOVE = -0.5, 1.5
+
+log = logging.getLogger(__name__)
+
+
+class Diverged(Exception):
+    """The network's output left the plausible range (it fails on this input)."""
 
 
 @dataclass(frozen=True)
@@ -111,8 +125,20 @@ class NAFNet(Restorer):
             ph, pw = -h % MULTIPLE, -w % MULTIPLE
             padded = np.pad(piece, ((0, 0), (0, 0), (0, ph), (0, pw)), mode="reflect")
             (y,) = session.run(None, {"image": padded})
-            return np.asarray(y)[:, :, :h, :w]
+            out = np.asarray(y)[:, :, :h, :w]
+            if out.min() < DIVERGED_BELOW or out.max() > DIVERGED_ABOVE:
+                raise Diverged
+            return out
 
-        y = run_tiled(run, x, 1, TILE, TILE_PAD, on_tile=self.step_callback)
+        try:
+            y = run_tiled(run, x, 1, TILE, TILE_PAD, on_tile=self.step_callback)
+        except Diverged:
+            log.warning(
+                "NAFNet (%s) failed on this image (its output diverged), so it was left "
+                "unchanged. This happens on inputs unlike its training data, e.g. film grain "
+                "or heavy noise; for grainy scans try Real-ESRGAN's denoise_strength.",
+                params["variant"],
+            )
+            return gray.copy()
         out: np.ndarray = np.clip(y[0].mean(axis=0), 0.0, 1.0).astype(np.float32)
         return out

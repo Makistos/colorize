@@ -91,3 +91,20 @@ def test_codeformer_restores_a_face(registry):
 
     assert sharpness(out) > 1.5 * sharpness(blurred)
     assert np.allclose(out[400:], blurred[400:], atol=1e-6)
+
+
+@pytest.mark.parametrize("variant", ["deblur", "denoise"])
+def test_nafnet_never_returns_garbage_on_grain(registry, variant):
+    """Grainy input makes NAFNet diverge on some tiles; the result is then the input."""
+    import cv2
+    from skimage import data
+
+    from colorizer.core.restore import run_restorer
+
+    restorer = registry.restorers.get("nafnet", CPU)
+    clean = cv2.resize(data.camera().astype(np.float32) / 255, None, fx=2, fy=2).clip(0, 1)
+    noise = np.random.default_rng(0).normal(0, 0.05, clean.shape)
+    grainy = np.clip(clean + noise, 0, 1).astype(np.float32)
+    out = run_restorer(restorer, grainy, {"variant": variant})
+    mse_in = np.mean((grainy - clean) ** 2)
+    assert np.array_equal(out, grainy) or np.mean((out - clean) ** 2) < 2 * mse_in
