@@ -23,9 +23,8 @@ uv run --group export python tools/export_onnx/zhang.py   # ECCV16 + SIGGRAPH17 
 uv run --group export python tools/export_onnx/deoldify.py   # DeOldify, rebuilt without fastai
 uv run --group export python tools/export_onnx/ddcolor.py    # DDColor, uses upstream code at a pinned commit
 uv run --group export python tools/export_onnx/realesrgan.py # restorers: re-implemented archs, no upstream code run
-uv run --group export python tools/export_onnx/nafnet.py
 uv run --group export python tools/export_onnx/codeformer.py
-uv run colorizer in/ out/ --restore nafnet,realesrgan --rparam realesrgan.scale=4 --rparam nafnet.blend=0.7
+uv run colorizer in/ out/ --restore realesrgan,codeformer --rparam realesrgan.scale=4 --rparam codeformer.blend=0.7
 uv run ruff check . && uv run ruff format . && uv run mypy src/colorizer/core
 ```
 
@@ -52,7 +51,6 @@ src/colorizer/
     deoldify.py
     sd_controlnet.py   # optional extra: `uv sync --extra diffusion`
     realesrgan.py  # restorers…
-    nafnet.py
     codeformer.py
     stubs.py       # swinir, seedvr2: registered, enabled = False
     _onnx.py, _tiles.py  # shared ONNX download/session plumbing, tiled inference
@@ -150,11 +148,10 @@ All take the shared `blend` param too. Gray input is replicated to RGB for these
 | id | Source (license) | Params | Notes |
 |---|---|---|---|
 | `realesrgan` | xinntao/Real-ESRGAN `realesr-general-x4v3` (BSD-3) | `scale` int 2\|4 (default 2); `tile` int 0–2048 step 32 (0 = off, default 512); `denoise_strength` float 0–1 (default 0.5) | Denoise = upstream DNI between the general and `wdn` weights, done inside the ONNX graph (`denoise` input): ORT ignores initializer overrides for prepacked weights at the default optimization level. Scale 2 = x4 then Lanczos down (upstream `--outscale`). |
-| `nafnet` | megvii-research/NAFNet (MIT) | `variant` choice [deblur, denoise] (default denoise) | GoPro-width64 / SIDD-width64; weights from a HF mirror pinned by commit, byte-identical to the official Google Drive files. 384 px tiles (≈ upstream NAFNetLocal), padded to multiples of 16. Denoise slightly smooths already-clean images; use `blend`. Both networks can diverge (grid-like garbage, outputs far outside [0, 1]) on out-of-domain input such as film grain; this is upstream behaviour (OpenCV's independent conversion does it too), so any tile leaving [-0.5, 1.5] makes the restorer return its input unchanged with a warning. |
 | `codeformer` | sczhou/CodeFormer (S-Lab License 1.0, **non-commercial**) | `fidelity` float 0–1 (default 0.7); `upscale_bg` bool (default false: same size; true: 2x via Real-ESRGAN) | Faces via OpenCV YuNet (MIT, HF `opencv/face_detection_yunet` pinned), FFHQ 5-point alignment, feathered square paste-back (no face-parsing net), tone-matched like upstream's gray path. `warning` shown in the UI. |
 | `swinir`, `seedvr2` | JingyunLiang/SwinIR, ByteDance-Seed/SeedVR (Apache-2.0) | — | Stubs: registered, `enabled = False`. |
 
-Restorer ONNX files are hosted in the `models-v2` release (`ONNX_RELEASE` in `models/_onnx.py` maps files to release tags; default `models-v1`). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch (NAFNet also checks that a degraded photo improves; on uniform noise it is ill-conditioned even in float64, so its check uses a real photo).
+Restorer ONNX files are hosted in the `models-v2` release (`ONNX_RELEASE` in `models/_onnx.py` maps files to release tags; default `models-v1`). The export scripts re-implement each architecture (no upstream code is fetched or executed), load the official weights with `strict=True`, and check ONNX against PyTorch.
 
 ## Runtime (runtime.py)
 
@@ -182,7 +179,7 @@ Restorer ONNX files are hosted in the `models-v2` release (`ONNX_RELEASE` in `mo
 
 `colorizer INPUT OUTPUT [--model ID] [--param k=v ...] [--preset FILE] [--device cpu|cuda|...] [--format png|jpg|tiff] [--restore ID[,ID...]] [--rparam ID.KEY=VALUE ...]`
 
-- `--restore` sets the chain (in order; overrides the preset's). `--rparam` sets a restorer param or the shared `blend` (`nafnet.blend=0.5`); the id must be in the chain, and a repeated id shares its params. Restorer warnings are logged. `--list-models` lists restorers.
+- `--restore` sets the chain (in order; overrides the preset's). `--rparam` sets a restorer param or the shared `blend` (`codeformer.blend=0.5`); the id must be in the chain, and a repeated id shares its params. Restorer warnings are logged. `--list-models` lists restorers.
 
 - INPUT can be a file or a directory (recursive with `-r`).
 - Skip existing outputs unless `--overwrite` is given. Exit non-zero if any file failed, and print a summary.

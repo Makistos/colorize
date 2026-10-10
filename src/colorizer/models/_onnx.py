@@ -29,15 +29,11 @@ ONNX_SHA256: dict[str, str] = {
     "realesrgan_general_x4v3.onnx": (
         "da13b66846b4d1ec8b8e38a63c235372e8610caa2995b24adfdf27d302830a8f"
     ),
-    "nafnet_deblur.onnx": "39d150a0004d96b6bd9b9cdc8d6b39d275c19b54bccd755098f67c6a31bc74b3",
-    "nafnet_denoise.onnx": "4292fbfb7c9a327d5330174e14c7a30cbe14c90e215f88c43da48749aa2cfd0e",
     "codeformer.onnx": "5312d625adb3d1aef682ac636373f7967c74ba67efaf861f8087d7f5aecffd43",
 }
 # Release tag per file; anything not listed is in models-v1.
 ONNX_RELEASE: dict[str, str] = {
     "realesrgan_general_x4v3.onnx": "models-v2",
-    "nafnet_deblur.onnx": "models-v2",
-    "nafnet_denoise.onnx": "models-v2",
     "codeformer.onnx": "models-v2",
 }
 

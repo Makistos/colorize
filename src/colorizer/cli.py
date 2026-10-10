@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="ID.KEY=V",
-        help="restorer parameter, e.g. realesrgan.scale=4 or nafnet.blend=0.5; repeatable",
+        help="restorer parameter, e.g. realesrgan.scale=4 or codeformer.blend=0.5; repeatable",
     )
     p.add_argument("--device", help="auto, cpu, cuda, rocm, directml, coreml")
     p.add_argument("--format", choices=list(EXTENSIONS), help="output format")

@@ -77,7 +77,7 @@ def test_missing_onnx_downloads_from_models_v2(monkeypatch, tmp_path):
 
 
 class EchoSession:
-    """Identity network that records input shapes (NAFNet keeps the size)."""
+    """Same-size network (x 0.5) that records input shapes."""
 
     def __init__(self):
         self.shapes = []
@@ -86,33 +86,6 @@ class EchoSession:
         x = feeds["image"]
         self.shapes.append(x.shape)
         return [x * 0.5]
-
-
-def test_nafnet_pads_to_multiple_of_16_and_tiles(monkeypatch, tmp_path):
-    from colorizer.models import nafnet
-
-    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
-    for v in nafnet.VARIANTS.values():
-        (tmp_path / v.onnx).touch()
-    sessions = {}
-
-    def fake_create(path, device):
-        sessions[path.name] = EchoSession()
-        return sessions[path.name], device
-
-    monkeypatch.setattr(nafnet, "create_session", fake_create)
-    model = nafnet.NAFNet()
-    model.load(CPU)
-    gray = np.random.default_rng(2).uniform(0, 1, (500, 403)).astype(np.float32)
-    out = run_restorer(model, gray, {"variant": "deblur"})
-    assert out.shape == gray.shape and np.allclose(out, gray * 0.5)
-    shapes = sessions["nafnet_deblur.onnx"].shapes
-    assert len(shapes) > 1  # tiled
-    assert all(s[2] % 16 == 0 and s[3] % 16 == 0 and s[1] == 3 for s in shapes)
-    run_restorer(model, gray, {"variant": "denoise"})
-    assert set(sessions) == {"nafnet_deblur.onnx", "nafnet_denoise.onnx"}
-    with pytest.raises(ValueError):
-        run_restorer(model, gray, {"variant": "sharpen"})
 
 
 def test_paste_face_blends_only_inside_the_face():
@@ -150,28 +123,3 @@ def test_codeformer_declares_noncommercial_warning():
 
     assert "non-commercial" in CodeFormer.warning
     assert {p.name: p.default for p in CodeFormer.params} == {"fidelity": 0.7, "upscale_bg": False}
-
-
-def test_nafnet_divergence_returns_input_with_warning(monkeypatch, tmp_path, caplog):
-    from colorizer.models import nafnet
-
-    monkeypatch.setenv(weights.ENV_CACHE_DIR, str(tmp_path))
-    (tmp_path / "nafnet_denoise.onnx").touch()
-
-    class Exploding(EchoSession):
-        def run(self, _, feeds):
-            x = feeds["image"]
-            self.shapes.append(x.shape)
-            # The second tile blows up, like the real networks on out-of-domain input.
-            return [x * (200.0 if len(self.shapes) == 2 else 0.5)]
-
-    session = Exploding()
-    monkeypatch.setattr(nafnet, "create_session", lambda path, device: (session, device))
-    model = nafnet.NAFNet()
-    model.load(CPU)
-    gray = np.random.default_rng(3).uniform(0.2, 0.8, (500, 500)).astype(np.float32)
-    with caplog.at_level("WARNING"):
-        out = run_restorer(model, gray, {"variant": "denoise"})
-    assert np.array_equal(out, gray)  # unchanged, not a patchwork or garbage
-    assert len(session.shapes) == 2  # stopped at the first diverged tile
-    assert "left unchanged" in caplog.text
